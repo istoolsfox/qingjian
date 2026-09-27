@@ -81,6 +81,14 @@ fn cursor_edits_requery_from_the_start_and_map_into_marked_text() {
 }
 
 #[test]
+fn shifted_brackets_punctuate_to_corner_quotes() {
+    // macOS 上 ⇧[ / ⇧] 产生的字符是 { / }，全角标点下应出「」而不是放行半角花括号（issue #228）
+    let mut engine = engine();
+    assert_eq!(engine.punctuate('{'), Some("「"));
+    assert_eq!(engine.punctuate('}'), Some("」"));
+}
+
+#[test]
 fn punctuation_follows_committed_text() {
     let mut engine = engine();
     assert_eq!(engine.punctuate(','), Some("，"));
@@ -421,4 +429,122 @@ fn option_arrows_move_the_cursor_by_syllable() {
     engine.move_cursor_home();
     assert!(engine.move_cursor_syllable_right());
     assert_eq!(engine.composition().cursor(), "hello".len());
+}
+
+#[test]
+fn covered_word_beats_static_composition() {
+    // 整段拼音 shiguo 在词级正好是 石锅/试过：静态模型按高频单字拼出的 是过 不许以 [句] 插队（issue #98）
+    let dictionary = Dictionary::parse(
+        "石锅\tshi guo\t304\n试过\tshi guo\t4814\n是\tshi\t929226\n过\tguo\t300000\n",
+    )
+    .unwrap();
+    let mut engine =
+        Engine::new(dictionary).with_learner(Box::new(CountingLearner(HashMap::new())));
+    engine.set_input("shiguo");
+    let items = engine.query().unwrap().candidates.items;
+    assert!(items.iter().all(|c| c.text != "是过"));
+    assert!(!matches!(items[0].kind, CandidateKind::Sentence));
+    assert!(["石锅", "试过"].contains(&items[0].text.as_str()));
+
+    // 个人证据豁免：选过 是（weight 进 Viterbi 路径分）之后，是过 的组合带着个人加分回来，
+    // 与 #200 的 和并 同机制——个性化压过通用规则
+    engine.set_input("shi");
+    let shi = engine.query().unwrap().candidates.items[0].clone();
+    engine.commit(&shi);
+    engine.set_input("shiguo");
+    let items = engine.query().unwrap().candidates.items;
+    assert!(
+        items
+            .iter()
+            .any(|c| c.text == "是过" && c.kind == CandidateKind::Sentence)
+    );
+}
+
+// 个人 n-gram 按字形记、不记读音：的→一个 的证据来自 de 用法，`diyige` 打 di 音时语料级
+// 的 的→一个 bigram 加上个人旧账，把 的+一个 抬成整句转换的最优路径。用户在同输入串下
+// 明确选过 第一个（直接证据）时，间接证据越权，[句] 让位。
+#[test]
+fn chosen_covered_word_beats_incidental_personal_ngram() {
+    // 正面：选过 第一个（同输入串选择记录）＋ 的→一个 的个人二元（字形记录，读音错位）
+    let mut learner = NgramLearner::default();
+    learner.choices.insert("diyige\t第一个".to_owned(), 2);
+    learner.ngram.record_times(
+        crate::sentence::Context {
+            previous: Some("的"),
+            earlier: None,
+        },
+        "一个",
+        5,
+    );
+    let mut engine = Engine::new(diyige_dict())
+        .with_language_model(Box::new(MiniLm))
+        .with_learner(Box::new(learner));
+    engine.set_input("diyige");
+    let items = engine.query().unwrap().candidates.items;
+    assert_eq!(items[0].text, "第一个");
+    assert!(items.iter().all(|c| c.text != "的一个"));
+
+    // 反面：没显式选过整段词时，个人 n-gram 抬起的整句仍按设计赢（#200 和并 同机制）
+    let mut learner = NgramLearner::default();
+    learner.ngram.record_times(
+        crate::sentence::Context {
+            previous: Some("的"),
+            earlier: None,
+        },
+        "一个",
+        5,
+    );
+    let mut engine = Engine::new(diyige_dict())
+        .with_language_model(Box::new(MiniLm))
+        .with_learner(Box::new(learner));
+    engine.set_input("diyige");
+    let items = engine.query().unwrap().candidates.items;
+    assert!(
+        items
+            .iter()
+            .any(|c| c.text == "的一个" && c.kind == CandidateKind::Sentence)
+    );
+}
+
+/// diyige 场景的最小词库：真实词频（第一个 19032、一个 662424、的 的 de/di 两种读音）。
+fn diyige_dict() -> Dictionary {
+    Dictionary::parse(
+        "第一个\tdi yi ge\t19032\n的\tde\t10189450\n的\tdi\t21162\n一个\tyi ge\t662424\n",
+    )
+    .unwrap()
+}
+
+/// 带个人 n-gram 与同输入串选择记录的最小学习器：复现 diyige 的两个个人证据来源。
+#[derive(Default)]
+struct NgramLearner {
+    choices: HashMap<String, u32>,
+    ngram: crate::sentence::UserNgram,
+}
+
+/// 迷你语言模型：只认识语料级的 的→一个 bigram（lm.qj 里这条搭配真实存在且极强）。
+struct MiniLm;
+
+impl crate::sentence::LanguageModel for MiniLm {
+    fn log_prob(&self, previous: Option<&str>, word: &str) -> Option<f64> {
+        (previous == Some("的") && word == "一个").then_some(0.99f64.ln())
+    }
+}
+
+impl Learner for NgramLearner {
+    fn record(&mut self, _candidate: &Candidate) {}
+
+    fn weight(&self, _text: &str) -> u32 {
+        0
+    }
+
+    fn choice_weight(&self, input: &str, text: &str) -> u32 {
+        self.choices
+            .get(&format!("{input}\t{text}"))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn user_ngram(&self) -> Option<&crate::sentence::UserNgram> {
+        Some(&self.ngram)
+    }
 }
