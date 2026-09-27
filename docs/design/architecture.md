@@ -45,14 +45,16 @@ qingjian/
 │   ├── qingjian-lm/            # 整句转换的 bigram 语言模型：LanguageModel 的实现
 │   ├── qingjian-neural/        # 字级 Transformer 的本地推理（candle）：SentenceScorer 的实现，给整句前几条路径重打分
 │   ├── qingjian-format/        # .qj 数据容器：mmap 打开、零拷贝视图、写入器、可落盘的哈希索引（dictionary / lm 依赖它）
+│   ├── qingjian-render/        # 自绘渲染器：候选窗一帧 + 主题 → 位图，各平台贴图
+│   ├── qingjian-update/        # 检查更新：读 releases.json、验 ed25519 签名、按平台与渠道挑新版本
 │   └── qingjian-platform/      # 平台层共用的部分：配置文件、协议类型
 │
 ├── apps/
 │   ├── cli/                    # 测试工具：查询、逐键计时、输入日志回放评测、整句评测
 │   ├── macos/                  # IMK 输入法壳（app / host / imk / candidates / menubar / preferences）
-│   ├── windows/                # Server 进程（IPC 分派 + Engine + 命名管道）
-│   ├── windows-tsf/            # TSF 文本服务 DLL（cdylib）：COM 链路 + 连 Server 的管道客户端
-│   └── linux/                  # 规划
+│   ├── windows/                # 同一个产品的四个 package：server（IPC 分派 + Engine + 命名管道 + 自绘候选窗）、
+│   │                           #   tsf（TSF 文本服务 DLL：COM 链路 + 连 Server 的管道客户端）、settings（WinUI 3）、installer
+│   └── linux/                  # server（Engine + Unix socket）+ fcitx5（C++ 插件）+ scripts
 │
 ├── tools/
 │   ├── dict-convert/           # 产品数据生成：lexicon / bigram / mine / english / emoji / pack
@@ -138,7 +140,7 @@ qingjian-core
 ## crate 依赖方向
 
 ```text
-qingjian-dictionary        （纯数据加载与查询，不依赖任何兄弟 crate）
+qingjian-dictionary        （纯数据加载与查询，依赖 qingjian-format 的 .qj 容器）
         ▲
 qingjian-core              （定义 Translator / Learner / Predictor trait，依赖 dictionary）
         ▲           ▲            ▲
@@ -296,7 +298,7 @@ CC-CEDICT 表（`dict-convert cedict`）保留为备用来源，覆盖面广但�
   删掉「沃德 书」两个词重打成「我的 书」也认得出（日志里这种错法一天十几次，以前只看最后一次上屏，一次都没撤回，错词越选越靠前）；
   重打后选的还是同一个词只把记录丢掉；重打的拼音谁都对不上就当在改别处，全忘掉；删得比记着的几次加起来还多也全忘掉。
   标点、英文词、原样上屏这些没学习的上屏也留一条只有长度的记录，退格数过它们才能数到更早的词。
-  整句候选与某个词候选文本相同时（用户词、或按别的读音对上的词）不重复插，但把那个词提到整句该在的位置：整句转换认定的最好读法不该被词级排序（别的词选过更多次）压在后面。
+  整句候选与某个词候选文本相同时（用户词、或按别的读音对上的词）不重复插，但把那个词提到整句该在的位置：整句转换认定的最好读法不该被词级排序（别的词选过更多次）压在后面。反过来，整段拼音在词级正好是一个词时，没有个人证据的静态组合（`shiguo` 的 是过）也不出整句让位给它——组合的各字在词级本来就各自可选；有个人 n-gram / 用户选择加持的路径仍按设计赢（2026-09-27，修 `shiguo`→是过 压住 石锅/事故 一类）。
   云端词学成用户词时读音以用户敲的拼音为准（能切成与字数相同的完整音节、每个又是那个字的读音时），否则用模型给的但逐字核对词库读音，核不过不学：
   模型把「我的」读音给成 `wo di` 之后，这条用户词按错读音出现在候选里，把正确的整句候选「我的」顶掉、自己又排在「沃德」后面，就是这么来的。
   用户点选的转移记双份（`EXPLICIT_TRANSITION_WEIGHT`），整句路径里顺带的记一份：整句是模型自己算的，按空格接受会把它喂回模型形成回声，
@@ -485,7 +487,7 @@ CC-CEDICT 表（`dict-convert cedict`）保留为备用来源，覆盖面广但�
   TSF 规定键盘类 TIP 必须看上下文的 `GUID_COMPARTMENT_KEYBOARD_DISABLED`（微软文档明说密码框应禁用文本服务、`IS_PASSWORD` 只是标注不提供保护；Chromium 给密码框的上下文设的就是它），
   DLL 在 `OnTestKeyDown` / `OnKeyDown` / 保留键里没在组句时先查它（连同 `EMPTYCONTEXT`，`com/context.rs`），非零整键放行、不组句——与 macOS 的 Secure Input 同一语义；
   输入范围（`GUID_PROP_INPUTSCOPE`）只在起组句那次编辑会话里读一次（`com/edit/surrounding.rs::input_context`）：含 `IS_PRIVATE` / 密码 / PIN 之一算**私密**——Chromium 源码里密码框与不学习的输入框映射成 `IS_PRIVATE`（含义「别学」；2026-09-12 box 实测 Edge InPrivate 的网页文本框报的仍是 `IS_SEARCH`，`IS_PRIVATE` 只在密码框见过，这条是兜底）——私密时不读前文，并随 `ClientMessage::Privacy` 告诉 Server（客户端只在变了时发；记事本等不支持该属性的应用 `GetValue` 失败按不私密）。
-  Server 按会话记 `private`、焦点切换时重设，Core `Engine::set_private`：学习器与输入日志外面各套一层 `Muted*`（写吞掉、读照常，排序不变），联想 / 翻译 / 释义兜底不发。协议版本 4。
+  Server 按会话记 `private`、焦点切换时重设，Core `Engine::set_private`：学习器与输入日志外面各套一层 `Muted*`（写吞掉、读照常，排序不变），联想 / 翻译 / 释义兜底不发。协议版本 7（`PROTOCOL_VERSION` 在 `qingjian-platform::protocol`，v7 加任务栏图标右键菜单的 `Indicator`；与 `docs/notes/crate-notes.md` 一致）。
 - **版本与发布**：各平台壳版本号独立（见 `docs/notes/release.md`）；`apps/windows/server/Cargo.toml` 写死自己的 `version`，
   发布标签见 `docs/notes/release.md`（0.1.4 起三个平台共用 `v<版本>`）。`qingjian-windows-tsf` 是同一 Windows 产品的另一半（各自 `Cargo.toml` 记版本；两个 package 同放 `apps/windows/` 下，是一个产品的两个产物——不合成一个 crate，因为 DLL 不能带 Engine 的依赖树）。
 
