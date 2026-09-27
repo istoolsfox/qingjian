@@ -580,13 +580,29 @@ impl Engine {
         // 拼出的组合（是过 / 床安奇）不许以 [句] 身份插到它前面——组合的各字在词级本来就各自可选，
         // 整句只在真有个人证据（个人 n-gram / 用户选择把路径分抬离静态分）时才按设计赢（`hebk` 的 和并）。
         // 同文本的词不在此列：读音相同的留给下面的去重让位，读音不同的（错读音用户词）要靠整句纠正。
+        // 但个人 n-gram 按字形记、不记读音，`diyige` 打 di 音时 的→一个 的旧账也来抬分——用户在同
+        // 输入串下明确选过那个整段词（`diyige` 选过 第一个，直接证据）时，整句照样让位。
         if !conversion.altered() {
             let letters = best.joined("");
-            let covered = items
-                .iter()
-                .any(|c| c.kind == CandidateKind::Chinese && c.syllables.concat() == letters);
+            let mut covered = false;
+            let mut chose_covered = false;
+            for candidate in items.iter() {
+                if candidate.kind != CandidateKind::Chinese
+                    || candidate.syllables.concat() != letters
+                {
+                    continue;
+                }
+                covered = true;
+                if self.learner.choice_weight(&letters, &candidate.text) > 0 {
+                    chose_covered = true;
+                    break;
+                }
+            }
             let same_text = items.iter().any(|c| c.text == conversion.text);
-            if covered && !same_text && (conversion.score - conversion.static_score).abs() <= 1e-6 {
+            if covered
+                && !same_text
+                && ((conversion.score - conversion.static_score).abs() <= 1e-6 || chose_covered)
+            {
                 return None;
             }
         }
