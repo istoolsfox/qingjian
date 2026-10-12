@@ -146,6 +146,9 @@ impl Engine {
                 self.learner.record_choice(&input, &candidate.text);
                 (consumed, input)
             }
+            // 模型直接生成的整句没有音节对齐（`yongdockerbushuhenfangbian` 的 `docker` 不是拼音），
+            // 按音节消耗拼音对不上，吃掉整段作用域；也因此没法拆成词记学习
+            CandidateKind::Generated => self.whole_scope(),
             // 英文词与快捷候选对应整段作用域；选中的英文词记次数并进个人英文词表，下次同样的前缀它靠前
             CandidateKind::English | CandidateKind::Shortcut | CandidateKind::Custom(_) => {
                 if candidate.kind == CandidateKind::English {
@@ -242,7 +245,8 @@ impl Engine {
             CandidateKind::English
             | CandidateKind::Shortcut
             | CandidateKind::Custom(_)
-            | CandidateKind::Emoji => self.chain.reset(),
+            | CandidateKind::Emoji
+            | CandidateKind::Generated => self.chain.reset(),
         }
         // 一次整句上屏里的几个词不算分段选，只有这段拼音经过至少两次上屏才合起来看
         let phrase = if split && !buffer_left {

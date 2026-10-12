@@ -4,6 +4,7 @@
 //! 不依赖任何平台 API，是 Core 的第一个「壳」。
 
 mod args;
+mod cold;
 mod display;
 mod error;
 mod eval;
@@ -46,6 +47,15 @@ fn run() -> Result<(), CliError> {
     engine.set_english_mode(args.english_mode);
     engine.set_chinese_first(args.chinese_first);
     tuning::apply(&mut engine, &args.tune)?;
+    if let Some(input) = &args.eval_cold {
+        cold::run(
+            &mut engine,
+            input,
+            args.cold_output.as_deref().expect("required by clap"),
+            args.cold_model.as_deref(),
+        )?;
+        return Ok(());
+    }
     // 查码：只看码表，不查词、不进交互
     if !args.aux_query.is_empty() {
         for word in &args.aux_query {
@@ -70,12 +80,23 @@ fn run() -> Result<(), CliError> {
         print!("{report}");
         return Ok(());
     }
+    if let Some(model) = &args.eval_generate {
+        let report = eval::generate::run(
+            &engine,
+            &args.eval_text,
+            model,
+            args.eval_details.as_deref(),
+        )?;
+        print!("{report}");
+        return Ok(());
+    }
     if !args.eval_text.is_empty() {
         let report = eval::run(
             &mut engine,
             &args.eval_text,
             args.eval_save.as_deref(),
             args.misses,
+            args.eval_details.as_deref(),
         )?;
         print!("{report}");
         return Ok(());
@@ -209,32 +230,61 @@ fn build_engine(args: &Args) -> Result<Engine, CliError> {
     if let Some(dir) = &args.neural {
         let started = Instant::now();
         let scorer = qingjian_neural::CharScorer::load(dir)?;
+        // 与产品端一致：字表里有 <sep> 的是 P2C 模型，按按键打分；没有的是字级模型，按前文打分
+        let p2c = scorer.vocab().sep().is_some();
+        let scorer: Box<dyn qingjian_core::sentence::SentenceScorer> = if p2c {
+            Box::new(qingjian_neural::P2cScorer(scorer))
+        } else {
+            Box::new(scorer)
+        };
         tracing::info!(
             load_ms = started.elapsed().as_millis(),
             weight = args.neural_weight.unwrap_or(qingjian_core::NEURAL_WEIGHT),
+            kind = if p2c { "P2C" } else { "字级" },
             "神经重打分已启用"
         );
         engine = if args.neural_async {
             engine.with_async_sentence_scorer(
-                Box::new(scorer),
+                scorer,
                 args.neural_weight,
                 args.neural_margin,
                 args.neural_context,
             )
         } else {
             engine.with_sentence_scorer(
-                Box::new(scorer),
+                scorer,
                 args.neural_weight,
                 args.neural_margin,
                 args.neural_context,
             )
         };
     }
+    if let Some(path) = &args.eval_p2c {
+        let scorer = qingjian_neural::CharScorer::load(path)?;
+        if scorer.vocab().sep().is_none() {
+            return Err(qingjian_neural::NeuralError::Corrupt(
+                "Hanzhang Tongbian model requires a <sep> token in its vocabulary",
+            )
+            .into());
+        }
+        engine = engine.with_sentence_scorer(
+            Box::new(eval::p2c::P2cScorer(scorer)),
+            args.neural_weight,
+            args.neural_margin,
+            None,
+        );
+    }
     let config_path = args
         .config
         .clone()
         .unwrap_or_else(args::default_config_file);
-    let mut config = Config::load(&config_path)?;
+    let mut config = if args.eval_cold.is_some() {
+        let mut isolated = Config::default();
+        isolated.predict.enabled = false;
+        isolated
+    } else {
+        Config::load(&config_path)?
+    };
     if args.predict {
         config.predict.enabled = true;
     }

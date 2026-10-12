@@ -26,4 +26,8 @@ pub enum CandidateKind {
 
     /// 离线整句转换的结果（多个词拼成），带全部音节；上屏按音节消耗拼音，路径上的词逐条记入个人 n-gram，不记词频。
     Sentence,
+
+    /// 模型直接按按键生成的整句（`yongdockerbushuhenfangbian` → 用docker部署很方便）：
+    /// 词图读不通整段输入时的兜底来源，没有音节对齐，上屏吃掉整段作用域、不记学习。
+    Generated,
 }

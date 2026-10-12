@@ -8,6 +8,9 @@ use qingjian_translate::GlossaryError;
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
     #[error(transparent)]
+    Cold(#[from] crate::cold::error::ColdError),
+
+    #[error(transparent)]
     Dictionary(#[from] DictionaryError),
 
     #[error(transparent)]

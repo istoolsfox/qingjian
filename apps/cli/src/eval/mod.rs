@@ -8,11 +8,14 @@
 
 pub mod coverage;
 mod extract;
+pub mod generate;
+pub mod p2c;
 mod pair;
 mod report;
 mod transcribe;
 
 use std::collections::HashSet;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -29,6 +32,7 @@ pub fn run(
     paths: &[PathBuf],
     save: Option<&Path>,
     show_misses: usize,
+    details: Option<&Path>,
 ) -> Result<Report, EvalError> {
     // 码表覆盖率与句子集无关，装了码表就先算（词库按词频两段口径）
     let mut report = Report {
@@ -48,14 +52,42 @@ pub fn run(
         })?;
         tracing::info!(path = %path.display(), count = pairs.len(), "句子集已保存");
     }
-    for pair in &pairs {
-        evaluate(engine, pair, &mut report, show_misses);
+    let mut writer = details
+        .map(|path| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map(BufWriter::new)
+                .map_err(|source| EvalError::Write {
+                    path: path.to_owned(),
+                    source,
+                })
+        })
+        .transpose()?;
+    for (index, pair) in pairs.iter().enumerate() {
+        let row = evaluate(engine, pair, &mut report, show_misses);
+        if let Some(writer) = &mut writer {
+            writeln!(writer, "{row}").map_err(|source| EvalError::Write {
+                path: details.expect("writer has path").to_owned(),
+                source,
+            })?;
+        }
+        if (index + 1) % 500 == 0 {
+            tracing::info!(done = index + 1, total = pairs.len(), "整句评测进度");
+        }
+    }
+    if let Some(writer) = &mut writer {
+        writer.flush().map_err(|source| EvalError::Write {
+            path: details.expect("writer has path").to_owned(),
+            source,
+        })?;
     }
     Ok(report)
 }
 
 /// 读全部文件，得到去重后的句子集：有制表符的文件按冻结格式读，其余当原始文本抽句、转拼音。
-fn collect(
+pub(super) fn collect(
     engine: &Engine,
     paths: &[PathBuf],
     report: &mut Report,
@@ -104,7 +136,12 @@ fn collect(
 }
 
 /// 评一句：清空引擎状态、写入上文、喂拼音、看候选。
-fn evaluate(engine: &mut Engine, pair: &Pair, report: &mut Report, show_misses: usize) {
+fn evaluate(
+    engine: &mut Engine,
+    pair: &Pair,
+    report: &mut Report,
+    show_misses: usize,
+) -> serde_json::Value {
     report.total += 1;
     engine.clear();
     engine.break_chain();
@@ -114,10 +151,10 @@ fn evaluate(engine: &mut Engine, pair: &Pair, report: &mut Report, show_misses: 
     let started = Instant::now();
     let query = match engine.query() {
         Ok(query) => query,
-        Err(_) => {
+        Err(error) => {
             report.unparsable += 1;
             engine.clear();
-            return;
+            return serde_json::json!({"text": pair.text, "pinyin": pair.pinyin, "error": error.to_string()});
         }
     };
     // 异步重打分：像壳一样停顿后请求、等结果、再查一次；等的时间也算进查询耗时
@@ -133,6 +170,10 @@ fn evaluate(engine: &mut Engine, pair: &Pair, report: &mut Report, show_misses: 
     let position = items.iter().position(|c| c.text == pair.text);
     if position == Some(0) {
         report.top1 += 1;
+    }
+    if let Some(rank) = position {
+        report.top3 += usize::from(rank < 3);
+        report.top5 += usize::from(rank < 5);
     }
     // 第一个盖住全部拼音的候选就是整句转换的答案（整句本身是个词时也可能是词库词）
     let length = pair.text.chars().count();
@@ -162,7 +203,16 @@ fn evaluate(engine: &mut Engine, pair: &Pair, report: &mut Report, show_misses: 
             )),
         ));
     }
+    let row = serde_json::json!({
+        "text": pair.text, "pinyin": pair.pinyin, "context": pair.context,
+        "top": items.first().map(|c| c.text.as_str()),
+        "sentence": sentence.map(|c| c.text.as_str()),
+        "position": position,
+        "query_ms": elapsed.as_secs_f64() * 1000.0,
+        "candidates": items.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+    });
     engine.clear();
+    row
 }
 
 /// 整句评测的错误。
@@ -181,4 +231,7 @@ pub enum EvalError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("P2C generation failed: {0}")]
+    Generate(#[from] qingjian_neural::NeuralError),
 }

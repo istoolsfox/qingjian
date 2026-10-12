@@ -224,6 +224,22 @@ fn english_completions_appear_when_pinyin_is_unlikely() {
 }
 
 #[test]
+fn english_in_chinese_off_drops_words_and_completions_but_not_english_mode() {
+    let words =
+        WordList::parse("company\tcompany\t5600\ncompare\tcompare\t4450\nhello\thello\t1000\n")
+            .unwrap();
+    let mut engine = engine().with_english(words);
+    engine.set_english_in_chinese(false);
+    engine.set_input("compa");
+    assert!(!texts_of(&engine).iter().any(|t| t.starts_with("comp")));
+    engine.set_input("hello");
+    assert!(!texts_of(&engine).contains(&"hello".to_owned()));
+    engine.set_english_mode(true);
+    engine.set_input("comp");
+    assert_eq!(texts_of(&engine), ["company", "compare"]);
+}
+
+#[test]
 fn english_mode_suggests_from_the_word_list_and_keeps_the_typed_text() {
     let words = WordList::parse(
         "company\tcompany\t900\ncompare\tcompare\t500\nhello\thello\t1000\nhelp\thelp\t700\n",
@@ -423,4 +439,213 @@ fn pinyin_like_english_tail_competes_with_the_plain_reading() {
     assert_eq!(mixed.syllables, ["wo", "de", "database"]);
     assert_eq!(engine.commit(&mixed), "我的database");
     assert!(engine.composition().is_empty());
+}
+
+/// 个人 n-gram 再肥也不该左右「混输还是纯拼音」：头段只覆盖一部分音节，整段读法多出来的那几个音节
+/// 会白拿一份按长度累积的个人加成，用户打得越多混输越打不出来。比分只看静态模型加敲错代价。
+#[test]
+fn personal_ngram_does_not_decide_between_mixed_and_plain_readings() {
+    const DICT: &str = "我\two\t900000\n的\tde\t800000\n我的\two de\t500000\n大\tda\t50000\n塔\tta\t3000\n巴\tba\t3000\n瑟\tse\t500\n";
+
+    struct NgramLearner(crate::sentence::UserNgram);
+
+    impl Learner for NgramLearner {
+        fn record(&mut self, _candidate: &Candidate) {}
+
+        fn weight(&self, _text: &str) -> u32 {
+            0
+        }
+
+        fn user_ngram(&self) -> Option<&crate::sentence::UserNgram> {
+            Some(&self.0)
+        }
+    }
+
+    let mut ngram = crate::sentence::UserNgram::default();
+    // 把纯拼音那条读法的每一步都记成用户的老习惯
+    for (previous, word) in [
+        (None, "我的"),
+        (Some("我的"), "大"),
+        (Some("大"), "塔"),
+        (Some("塔"), "巴"),
+        (Some("巴"), "瑟"),
+    ] {
+        ngram.record_times(
+            crate::sentence::Context {
+                previous,
+                earlier: None,
+            },
+            word,
+            5000,
+        );
+    }
+
+    let words = WordList::parse("database\tdatabase\t4310\n").unwrap();
+    let mut engine = Engine::new(Dictionary::parse(DICT).unwrap())
+        .with_english(words)
+        .with_learner(Box::new(NgramLearner(ngram)));
+
+    engine.set_input("wodedatabase");
+    let first = engine.query().unwrap().candidates.items[0].clone();
+    assert_eq!(first.text, "我的database", "个人 n-gram 不该把混输压下去");
+}
+
+/// 英文词频只问随包表：个人英文表存的是使用次数，当 Zipf×1000 读会一律塌到兜底值
+/// （`English` 用过两次 → Zipf 0.002 → 兜底 3.0，真实 5.19），等于用过一次反而更难打出来。
+#[test]
+fn personal_english_usage_count_does_not_replace_the_shipped_frequency() {
+    const DICT: &str = "我\two\t900000\n的\tde\t800000\n我的\two de\t500000\n大\tda\t50000\n塔\tta\t3000\n巴\tba\t3000\n瑟\tse\t500\n";
+
+    struct PersonalEnglish(WordList);
+
+    impl Learner for PersonalEnglish {
+        fn record(&mut self, _candidate: &Candidate) {}
+
+        fn weight(&self, _text: &str) -> u32 {
+            0
+        }
+
+        fn user_english(&self) -> Option<&WordList> {
+            Some(&self.0)
+        }
+    }
+
+    // 个人表里是「用过 1 次」，随包表里是 Zipf 5.19。个人表排在前面，按 Zipf×1000 读就是 0.001，
+    // 会被夹到兜底的 Zipf 3，白丢 5 nat
+    let personal = WordList::parse("database\tdatabase\t1\n").unwrap();
+    let shipped = WordList::parse("database\tdatabase\t5190\n").unwrap();
+    let mut engine = Engine::new(Dictionary::parse(DICT).unwrap())
+        .with_english(shipped)
+        .with_learner(Box::new(PersonalEnglish(personal)));
+
+    let tail = engine
+        .split_english_tail("wodedatabase")
+        .expect("末尾是英文词");
+    let expected = (5.19 - 9.0) * std::f64::consts::LN_10;
+    assert!(
+        (tail.log_prob - expected).abs() < 1e-9,
+        "log_prob {} 不是随包表的 Zipf 5.19（{expected}）",
+        tail.log_prob,
+    );
+
+    engine.set_input("wodedatabase");
+    let first = engine.query().unwrap().candidates.items[0].clone();
+    assert_eq!(first.text, "我的database");
+}
+
+/// 打不出来时原样上屏的整串（`kaifarust`）不学成英文词，学进去了也不许堵掉混输：
+/// 它能读成「拼音头 + 英文尾」，把整串当英文词会让 `split_english_tail` 一开头就退出，
+/// 于是越打不出来学得越多、越学越打不出来。
+#[test]
+fn a_raw_committed_mixed_input_does_not_block_the_english_tail() {
+    #[derive(Default)]
+    struct EnglishLearner {
+        words: Vec<String>,
+        list: Option<WordList>,
+    }
+
+    impl Learner for EnglishLearner {
+        fn record(&mut self, _candidate: &Candidate) {}
+
+        fn weight(&self, _text: &str) -> u32 {
+            0
+        }
+
+        fn learn_english(&mut self, word: &str) {
+            self.words.push(word.to_owned());
+            let tsv: String = self
+                .words
+                .iter()
+                .map(|w| format!("{w}\t{w}\t1\n"))
+                .collect();
+            self.list = WordList::parse(&tsv).ok();
+        }
+
+        fn user_english(&self) -> Option<&WordList> {
+            self.list.as_ref()
+        }
+    }
+
+    let words = WordList::parse("rust\trust\t3740\n").unwrap();
+    let mut engine = Engine::new(Dictionary::parse(SAMPLE).unwrap())
+        .with_english(words)
+        .with_learner(Box::new(EnglishLearner::default()));
+
+    // 原样上屏整串：不该被记成英文词
+    engine.set_input("kaifarust");
+    assert_eq!(engine.take_raw(), "kaifarust");
+    engine.set_input("kaifarust");
+    let query = engine.query().unwrap();
+    assert!(
+        !query
+            .candidates
+            .items
+            .iter()
+            .any(|c| c.kind == CandidateKind::English && c.text == "kaifarust"),
+        "失败的混输不该进个人英文词表：{:?}",
+        query.candidates.items.first(),
+    );
+    assert_eq!(query.candidates.items[0].text, "开发rust");
+
+    // 就算个人表里已经有这条（老用户攒下的），混输那条路也要照走
+    let polluted = WordList::parse("kaifarust\tkaifarust\t1\n").unwrap();
+    struct Polluted(WordList);
+    impl Learner for Polluted {
+        fn record(&mut self, _candidate: &Candidate) {}
+
+        fn weight(&self, _text: &str) -> u32 {
+            0
+        }
+
+        fn user_english(&self) -> Option<&WordList> {
+            Some(&self.0)
+        }
+    }
+    let words = WordList::parse("rust\trust\t3740\n").unwrap();
+    let mut engine = Engine::new(Dictionary::parse(SAMPLE).unwrap())
+        .with_english(words)
+        .with_learner(Box::new(Polluted(polluted)));
+    engine.set_input("kaifarust");
+    assert_eq!(engine.query().unwrap().candidates.items[0].text, "开发rust");
+}
+
+/// 英文夹在中间的整串（`kaifarustdaima`）原样上屏也不学成英文词。
+///
+/// 上一个测试那条守卫靠 `split_english_tail`，只看得见句尾的英文；英文在中间时它返回 `None`，
+/// 于是整串照学不误——用户表里 `yongdockerbushuhenfangbian` 就是这么来的，学完还会顶到候选第一位。
+/// 这里靠的是长度上限（[`MAX_ENGLISH_WORD_LETTERS`]）。
+#[test]
+fn a_long_raw_commit_with_english_in_the_middle_is_not_learned() {
+    struct Recorder(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl Learner for Recorder {
+        fn record(&mut self, _candidate: &Candidate) {}
+
+        fn weight(&self, _text: &str) -> u32 {
+            0
+        }
+
+        fn learn_english(&mut self, word: &str) {
+            self.0.lock().unwrap().push(word.to_owned());
+        }
+    }
+
+    let learned = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let words = WordList::parse("rust\trust\t3740\n").unwrap();
+    let mut engine = Engine::new(Dictionary::parse(SAMPLE).unwrap())
+        .with_english(words)
+        .with_learner(Box::new(Recorder(learned.clone())));
+
+    // 英文夹在中间：`split_english_tail` 看不见 rust，只有长度上限拦得住
+    engine.set_input("yongdockerbushuhenfangbian");
+    assert_eq!(engine.take_raw(), "yongdockerbushuhenfangbian");
+    // 短的英文词照学不误
+    engine.set_input("kubectl");
+    assert_eq!(engine.take_raw(), "kubectl");
+
+    assert_eq!(
+        *learned.lock().unwrap(),
+        vec!["kubectl".to_owned()],
+        "只有真正像一个词的才该进个人英文词表"
+    );
 }

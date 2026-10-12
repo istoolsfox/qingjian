@@ -21,11 +21,15 @@ pub(crate) use self::state::RescoreState;
 use super::Router;
 use super::composed::{Composed, marked_parts};
 
-/// 找模型（`.qjm` 单文件，或开发时的三件套目录）：用户目录 `model/` 优先（用户自己的模型），否则随包 `data/model/`；都没有为 `None`。
+/// P2C 优先，同类模型里用户目录优先；没有 P2C 才回退字级模型。
 pub fn find_model(user_dir: Option<&Path>, bundled_root: &Path) -> Option<PathBuf> {
     let candidates = [
+        user_dir.map(|dir| dir.join("models/hanzhang-tongbian")),
+        user_dir.map(|dir| dir.join("model-p2c")),
+        Some(bundled_root.join("data/models/hanzhang-tongbian")),
+        user_dir.map(|dir| dir.join("models/hanzhang-zhiwei")),
         user_dir.map(|dir| dir.join("model")),
-        Some(bundled_root.join("data/model")),
+        Some(bundled_root.join("data/models/hanzhang-zhiwei")),
     ];
     candidates
         .into_iter()
@@ -88,10 +92,9 @@ impl Router {
         match loader.poll() {
             Loaded::Pending => {}
             Loaded::Done(result) => {
-                match *result {
+                match result {
                     Ok(scorer) => {
-                        self.engine
-                            .set_async_sentence_scorer(Some(Box::new(scorer)));
+                        self.engine.set_async_sentence_scorer(Some(scorer));
                         // 模型上线了：日志里补一条会话信息，之后的条目知道重排开着
                         self.engine
                             .log_session(env!("CARGO_PKG_VERSION"), "windows");
@@ -107,6 +110,7 @@ impl Router {
     /// 组句结束：什么都不等了；应用前文也作废（下一段组句 DLL 会再送）。
     pub(super) fn stop_rescoring(&mut self) {
         self.rescore.stop();
+        self.surrounding_before.clear();
         self.engine.set_rescoring_context(None);
     }
 
@@ -116,12 +120,15 @@ impl Router {
         if self.focused != Some(session) || self.engine.composition().is_empty() {
             return;
         }
+        self.surrounding_before = text.clone();
         self.engine
             .set_rescoring_context((!text.is_empty()).then_some(text));
         if matches!(self.composed, Some(Composed::Candidates { .. })) {
             // 查一次只为按新前文重新记下要打分的文本，候选顺序此刻不变
             let _ = self.engine.query();
             self.schedule_rescoring();
+            // 云联想也在等这份前文：带着新上下文重发，作废在飞的空上下文请求（worker 端有防抖）
+            self.refresh_prediction();
         }
     }
 

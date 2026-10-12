@@ -5,7 +5,8 @@
 
 use std::sync::mpsc::{TryRecvError, channel};
 
-use qingjian_neural::{CharScorer, NeuralError};
+use qingjian_core::sentence::SentenceScorer;
+use qingjian_neural::{CharScorer, NeuralError, P2cScorer};
 
 mod rescore_monitor;
 
@@ -20,24 +21,40 @@ impl Host {
         if self.model_loader.is_some() || self.engine.has_sentence_scorer() {
             return;
         }
-        let Some(path) = paths::model_path() else {
-            tracing::info!("没有本地整句模型文件，不重排");
-            return;
+        // P2C 优先：冻结集 8322 句上比字级模型的重排高 0.69 个点、延迟还低（docs/notes/model-eval.md）
+        let (path, p2c) = match paths::p2c_model_path() {
+            Some(path) => (path, true),
+            None => match paths::model_path() {
+                Some(path) => (path, false),
+                None => {
+                    tracing::info!("没有本地模型文件，不重排");
+                    return;
+                }
+            },
         };
-        let (tx, rx) = channel::<Result<CharScorer, NeuralError>>();
+        let (tx, rx) = channel::<Result<Box<dyn SentenceScorer>, NeuralError>>();
         let spawned = std::thread::Builder::new()
             .name("qingjian-model-load".to_owned())
             .spawn(move || {
                 let started = std::time::Instant::now();
+                // 预热要走各自真正的前向：第一次前向要编译 Metal 内核，几百毫秒
                 let loaded = CharScorer::load(&path).and_then(|scorer| {
-                    scorer.score("", &["的"])?;
-                    Ok(scorer)
+                    if p2c {
+                        let scorer = P2cScorer::new(scorer)
+                            .ok_or(NeuralError::Corrupt("含章·通变模型缺少 <sep> 分隔符"))?;
+                        scorer.0.score_p2c("ni", &["你"])?;
+                        Ok(Box::new(scorer) as Box<dyn SentenceScorer>)
+                    } else {
+                        scorer.score("", &["的"])?;
+                        Ok(Box::new(scorer) as Box<dyn SentenceScorer>)
+                    }
                 });
                 if loaded.is_ok() {
                     tracing::info!(
                         path = %path.display(),
+                        kind = if p2c { "含章·通变" } else { "含章·知微" },
                         total_ms = started.elapsed().as_millis(),
-                        "本地整句模型已加载并预热"
+                        "本地模型已加载并预热"
                     );
                 }
                 let _ = tx.send(loaded);
@@ -59,8 +76,7 @@ impl Host {
         };
         match rx.try_recv() {
             Ok(Ok(scorer)) => {
-                self.engine
-                    .set_async_sentence_scorer(Some(Box::new(scorer)));
+                self.engine.set_async_sentence_scorer(Some(scorer));
                 self.model_loader = None;
                 self.rescore.stop_watching();
                 // 模型上线了：日志里补一条会话信息，之后的条目知道重排开着
@@ -69,7 +85,7 @@ impl Host {
                 self.rescore_current_round();
             }
             Ok(Err(error)) => {
-                tracing::warn!(%error, "本地整句模型加载失败，不重排");
+                tracing::warn!(%error, "本地模型加载失败，不重排");
                 self.model_loader = None;
                 self.rescore.stop_watching();
             }

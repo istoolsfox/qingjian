@@ -37,6 +37,7 @@ def main():
     if not data.is_absolute():
         raise SystemExit('XDG_DATA_HOME 必须是绝对路径')
     files = {prefix / 'share/licenses/qingjian/LICENSE': root / 'LICENSE',
+             prefix / 'share/licenses/qingjian/LICENSE-CNS11643.txt': root / 'assets/stroke/LICENSE-CNS11643.txt',
              data / 'icons/hicolor/128x128/apps/qingjian.png': root / 'assets/icon/logo.png',
              prefix / 'bin/qingjian-linux-server': Path(server),
              prefix / 'lib/fcitx5/qingjian.so': Path(plugin)}
@@ -61,8 +62,8 @@ def main():
             for member in bundle.getmembers():
                 if not member.isfile():
                     continue
-                source = (generated / member.name).resolve()
-                if not source.is_relative_to(generated.resolve()):
+                source = (root / member.name).resolve()
+                if not source.is_relative_to((root / 'data').resolve()):
                     raise SystemExit('数据包路径越界')
                 checksum = hashlib.file_digest(bundle.extractfile(member), 'sha256').hexdigest()
                 if not source.is_file() or digest(source) != checksum:
@@ -70,16 +71,20 @@ def main():
                 verified[source] = checksum
         wanted = ('dict.qj', 'lm.qj', 'lm-unigram.tsv', 'lm-bigram.tsv', 'english.tsv')
         for source in generated.rglob('*'):
-            if source.is_file() and (source.name in wanted or source.name.startswith('glossary-') or source.parent.name == 'dicts'):
+            if source.is_file() and not source.name.startswith('._') and (source.name in wanted or source.name.startswith('glossary-') or source.parent.name in ('dicts', 'codes')):
                 if source.resolve() not in verified:
                     raise SystemExit(f'产品数据没有校验记录：{source}')
                 files[resources / source.relative_to(root)] = source
-        model = root / 'data/model/model.qjm'
+        model = root / 'data/models/hanzhang-zhiwei/hanzhang-zhiwei-small.qjm'
         if not model.is_file():
-            raise SystemExit('缺少本地整句模型 data/model/model.qjm，请先运行 tools/release/data-fetch.sh，或用 --sample 体验样例词库')
-        if digest(model) != lock.get('model.qjm'):
-            raise SystemExit('本地整句模型与 tools/release/data.lock 校验值不符')
-        files[resources / 'data/model/model.qjm'] = model
+            raise SystemExit('缺少含章·知微 hanzhang-zhiwei-small.qjm，请先运行 tools/release/data-fetch.sh，或用 --sample 体验样例词库')
+        if verified.get(model.resolve()) != digest(model):
+            raise SystemExit('含章·知微不在已校验的数据包中')
+        files[resources / model.relative_to(root)] = model
+        p2c_model = root / 'data/models/hanzhang-tongbian/hanzhang-tongbian-small.qjm'
+        if not p2c_model.is_file() or verified.get(p2c_model.resolve()) != digest(p2c_model):
+            raise SystemExit('含章·通变缺失或不在已校验的数据包中')
+        files[resources / p2c_model.relative_to(root)] = p2c_model
     # 安装前先检查所有目标，避免覆盖其他来源的同名文件。
     for target in files:
         if target.is_symlink() or (target.exists() and (str(target) not in old or digest(target) != old[str(target)])):

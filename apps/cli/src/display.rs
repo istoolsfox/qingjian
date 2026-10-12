@@ -232,6 +232,7 @@ fn format_candidate(candidate: &Candidate, width: usize) -> String {
         qingjian_core::CandidateKind::Shortcut => "[v] ",
         qingjian_core::CandidateKind::Custom(_) => "[custom] ",
         qingjian_core::CandidateKind::Sentence => "[句] ",
+        qingjian_core::CandidateKind::Generated => "[生成] ",
         qingjian_core::CandidateKind::Emoji => "",
     };
     format!(

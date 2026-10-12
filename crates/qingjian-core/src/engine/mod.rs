@@ -118,6 +118,12 @@ pub struct Engine {
     /// 用户定义的固定位置文本。
     custom_phrases: Vec<crate::CustomPhrase>,
 
+    /// 候选后面配不配 emoji（配置 `[general] emoji`，缺省开）；关了 emoji 表照样加载，只是不出候选。
+    emoji_candidates: bool,
+
+    /// 中文模式下整段是英文词（或像英文词的开头）时给不给英文候选与补全（配置 `[general] english_in_chinese`，缺省开）。
+    english_in_chinese: bool,
+
     /// 中英混输时中文候选总在英文词前面（缺省关：拼音不像话的输入英文词排第一，常在中文模式里打英文词的人靠它）。
     chinese_first: bool,
 
@@ -298,6 +304,13 @@ const ENGLISH_COMPLETIONS: usize = 3;
 /// 原样上屏的字母串至少几个字母才当英文词学：单字母（`a`、`I`）不值得记。
 const MIN_ENGLISH_WORD_LETTERS: usize = 2;
 
+/// 原样上屏的字母串最多几个字母才当英文词学：再长的多半不是一个词，是一整句打不出来的输入
+/// （`yongdockerbushuhenfangbian`），学进去会反过来堵住混输那条路。
+/// 15 是 2026-09-25 按数据定的：用户个人表 1102 条里超过 15 个字母的 9 条全是失败的拼音、无一真词；
+/// 随包英文词表 94568 条里超过 15 个字母的只占 0.69%，而那些词基本都已经在随包表里、不靠学。
+/// 英文模式下不设这个上限：那时敲的本来就是英文。
+const MAX_ENGLISH_WORD_LETTERS: usize = 15;
+
 /// 英文模式一次最多给几条候选：两页足够，再往后没人翻。
 const ENGLISH_MODE_CANDIDATES: usize = 18;
 
@@ -355,6 +368,15 @@ const MAX_CANDIDATES: usize = 500;
 /// 神经重打分看 Viterbi 的前几条路径：束宽是 8，再多也没有。
 const RESCORE_PATHS: usize = 6;
 
+/// 长输入最多给几条整句候选（重排后的前几条路径）：一条不够用，长句错一个字就得拆开重打。
+const SENTENCE_CANDIDATES: usize = 3;
+
+/// 短于这么多音节的不给备选整句：那时候选表里的词级候选比另一种读法有用。
+const ALTERNATE_MIN_SYLLABLES: usize = 4;
+
+/// 短于这么多字母的不让模型直接生成整句：那么短的输入词级候选够用，生成的几十毫秒不值。
+const MIN_GENERATED_LETTERS: usize = 6;
+
 /// 神经重打分的缺省权重 λ（见 `Engine::neural_weight`）：整句评测集上 0.5 到 1.0 一样好、0.75 最高（见 docs/notes/neural-rescoring.md），
 /// 取 0.5 给个人 n-gram 留余量；回放里看到的「λ 大整句掉」是那把尺子的偏差。
 pub const NEURAL_WEIGHT: f64 = 0.5;
@@ -380,6 +402,8 @@ impl Engine {
             punctuation: Punctuation::default(),
             full_width_punctuation: true,
             custom_phrases: Vec::new(),
+            emoji_candidates: true,
+            english_in_chinese: true,
             chinese_first: false,
             shift_letter_compose: false,
             predictor: Box::new(NoPredictor),
@@ -459,12 +483,15 @@ fn is_raw(text: &str, modes: ModeKeys, shuangpin: Option<Scheme>, zhuyin: bool) 
 
 /// 命中是否靠模糊音：某个音节不被敲的那个模式接受。
 /// 原样上屏的字母串像不像一个英文词：纯 ASCII 字母、至少两个。中文模式下还要求它**不能**切成完整的拼音
-/// （`hao` 回车多半是要拼音字母本身，`gist` / `python` / `hello` 切不干净才是英文）；英文模式下敲的全是英文，不用判。
+/// （`hao` 回车多半是要拼音字母本身，`gist` / `python` / `hello` 切不干净才是英文），
+/// 且不能长过 [`MAX_ENGLISH_WORD_LETTERS`]；英文模式下敲的全是英文，两条都不用判。
 fn looks_like_english_word(raw: &str, english_mode: bool) -> bool {
     if raw.len() < MIN_ENGLISH_WORD_LETTERS || !raw.bytes().all(|b| b.is_ascii_alphabetic()) {
         return false;
     }
-    english_mode || !parser::is_fully_segmentable(&raw.to_ascii_lowercase())
+    english_mode
+        || (raw.len() <= MAX_ENGLISH_WORD_LETTERS
+            && !parser::is_fully_segmentable(&raw.to_ascii_lowercase()))
 }
 
 /// 模式的记忆化键：完整音节原样，前缀音节后加 `*`。
