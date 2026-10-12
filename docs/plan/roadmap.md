@@ -67,7 +67,8 @@
 - [x] 英文模式候选（Core `english`，`Engine::set_english_mode`）：词表精确词 / 前缀补全 / 一处编辑纠正，Tab 与上下键选词（上下键动过之后空格也选），空格回车标点原样上屏；
   `[general] english_candidates` 可关；CLI `--english-mode`
 - [x] 按应用关英文候选（2026-09-05）：`[apps] english_candidates_off`，按 `bundleIdentifier` 认，缺省终端 / 编辑器 / IDE 名单，`*` 前缀匹配；
-  偏好设置「通用」页勾选框；`[apps]` 分节留给以后的按应用 preedit 模式
+  偏好设置「通用」页勾选框；`[apps]` 分节留给以后的按应用 preedit 模式。2026-10-10 改成白名单 `english_candidates_on`（缺省浏览器 / 聊天 / 办公），
+  Photoshop 这类靠单键快捷键的软件列不完
 - [x] 个人英文词表（2026-09-05，`user-english.tsv`）：回车 / 英文模式直通原样上屏的英文词（切不成完整拼音的字母串）与选过的英文候选都记，
   与随包词表一起出英文候选且在前；修的是 `gist` 这类随包词表里没有的词永远出不了候选、回车多少次也学不会的问题
 - [x] 中英混输：整段输入在英文词表里即出英文候选，作为拼音「不像话」时排第一，否则排第二（词表 2026-09-05 起来自 `assets/lexicon/05_english`，ESDB / CSpell，MIT）
@@ -216,9 +217,9 @@ Core 永远不联网。第一个实现接 DeepSeek（OpenAI 兼容接口），�
 - [x] 整句评测集上过门槛（2026-09-08 晚）：冻结集 8322 句，基线整句首选 37.6%，small λ 0.75 前文 64 到 41.9%（+4.3），
   不给前文也有 +2.2；翻好 382 句、翻坏 54 句，见 `docs/notes/neural-rescoring.md`
 - [x] 进壳（2026-09-08 晚）：前文 KV 缓存（64 字前文 × 8 条 133 → 28 ms）、Core `engine/rescoring` 异步重排（后台线程 + 文本分数缓存，壳停键 80 ms 请求）、
-  应用光标前文当前文、λ 缺省 0.5、`[model] enabled` 开关与「云服务」页勾选、模型随包放 `Resources/model/`；TextEdit 端到端 候选声称 → 候选生成
+  应用光标前文当前文、λ 缺省 0.5、`[model] enabled` 开关与「云服务」页勾选、知微模型现随包放 `Resources/models/hanzhang-zhiwei/`；TextEdit 端到端 候选声称 → 候选生成
 - [x] 模型单文件 `.qjm`（2026-09-12）：`.qj` 容器新种类 `Kind::Model`，三节原样装三件套；`find_model` 先 `.qjm` 再目录；`pack model` / `tools/release/pack-model.sh`；
-  data Release 上传 `model.qjm`，mac `Resources/model/` 与 Windows `data\model` 只带这一个文件
+  data Release 上传 `model.qjm`，mac `Resources/models/hanzhang-zhiwei/` 与 Windows `data\models\hanzhang-zhiwei` 只带这一个文件
 - [ ] 本地模型后续：个人微调（闲时训练）；权重许可已定与代码一致 GPL-3.0-or-later（2026-09-12，写在 `pack-model.sh`）
 - [ ] 闲时训练：门禁包括接电源、温度、空闲时长；训练数据来自本地输入历史；模型与数据都可一键清除
 - [ ] 评测门槛：留出用户文本上比 n-gram 的困惑度与 top-1 命中率，赢了才默认启用；每次按键推理延迟有上限

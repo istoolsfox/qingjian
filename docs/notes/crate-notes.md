@@ -33,6 +33,8 @@ TSV 解析、查询与生成工具把 `lue` / `nue` 统一成 `lve` / `nve`。
 重排（stable sort 保住原序），命中码（没在筛码时是词的首条码）写进 `Candidate.aux_code`；码段非空时跳过整句 / 英文 / 快捷 / emoji / 自定义短语
 与云联想。preedit 分段多出 [触发键 `Typed`][码段 `MarkedKind::AuxCode`]，见 `Query::marked_segments`。
 
+双拼 `Scheme::syllable` 优先解出键位表里的合法音节；解不出且该韵母键含 `v` 时，j / q / x / y + ü 规范化为 ju / qu / xu / yu。只补此前无效的组合，不覆盖微软 `jv` → jue 等既有解码。
+
 形码（五笔）在 `engine::query::code`。`Engine` 上有两个开关：`set_code_table`（码表）与 `set_phonetic`（拼音侧参不参与），
 在 `query_inner` 进切分之前按这两个分派——只有拼音 / 只有形码（`query_code`）/ **两边都开（`query_mixed`，混输）**。
 编码按前缀查表，`CandidateKind::Code` 的候选 `syllables` 为空、上屏吃掉整段作用域（`whole_scope`）。
@@ -66,7 +68,9 @@ TSV 解析、查询与生成工具把 `lue` / `nue` 统一成 `lve` / `nve`。
 ## crates/qingjian-learning
 
 - `FrequencyLearner`：用户选择次数（`user.tsv`）、按输入串记的选择（`user-choices.tsv`，词级排序里同输入串选过的优先）、用户词（`user-words.tsv`，主词库同格式，
-  Engine 与主词库一起查）、个人英文词（`user-english.tsv`，回车原样上屏的英文词与选过的英文候选，与随包英文词表一起出候选且在前）、
+  Engine 与主词库一起查）、个人英文词（`user-english.tsv`，回车原样上屏的英文词与选过的英文候选，与随包英文词表一起出候选且在前；
+  原样上屏的串要像一个词才学：`MIN_ENGLISH_WORD_LETTERS` = 2 到 `MAX_ENGLISH_WORD_LETTERS` = 15 个字母、切不成完整拼音、
+  也不能读成「拼音头 + 英文尾」——打不出来时整串上屏的失败拼音学进去会反过来堵住混输那条路，越打不出来学得越多）、
   个人敲错表（`user-typos.tsv`，接受过的 (敲的, 要的) 音节对，词图敲错边与整段纠错的代价按它打折）与个人 n-gram（`user-ngram.tsv`，Core `sentence::UserNgram`，
   二元 + 三元在线计数，整句转换与词级排序里与静态模型插值；Tab 接受的云端整句按 `sentence::segment_text` 切词后也记；
   连着选出的两个词记够次数自动造词进用户词，一段拼音分几次选完的合成词记两次也造）。
@@ -100,14 +104,56 @@ TSV 解析、查询与生成工具把 `lue` / `nue` 统一成 `lve` / `nve`。
 
 ## crates/qingjian-neural
 
-`CharScorer`，Core `sentence::SentenceScorer` trait 的实现：candle 加载字级 Transformer（GPT-2 风格 decoder，训练仓库（本地 `../train`，私有，不在本仓库）导出的
-`model.safetensors` + `config.json` + `vocab.json`），给「前文 + 整句」按字累加 log 概率；前文的每层 K / V 缓存（`PrefixCache`），
-同一段前文只算一次，每个候选只算自己那几个字（64 字前文 × 8 条 28 ms，Metal）。features `accelerate` / `metal` 换后端，壳用 `metal`。
+candle 加载 Transformer（GPT-2 风格 decoder，导出成
+`model.safetensors` + `config.json` + `vocab.json` 三件套）。features `accelerate` / `metal` 换后端，壳用 `metal`。
+Metal 缺少 `MTLResidencySetDescriptor`（如 macOS 14）时改用 CPU/F32，避免 candle 创建设备时 panic；支持该类时仍用 Metal/F16。
+
+Core 的 `sentence::SentenceScorer` 有两个实现，同一个 trait 拿到**两种条件**（`context` 光标前文、`keys` 这批路径共同解释的那段按键），各挑自己训练时的那个、忽略另一个：
+
+- `CharScorer`（含章·知微，字级模型）用 `context`：给「前文 + 整句」按字累加 log 概率，前文的每层 K / V 缓存（`PrefixCache`），
+  同一段前文只算一次，每个候选只算自己那几个字（64 字前文 × 8 条 28 ms，Metal）。
+- `P2cScorer`（含章·通变，P2C 模型）用 `keys`，不看前文。**产品端整句重排用它**：冻结集 8322 句上 42.49% 对含章·知微字级模型的 41.80%
+  （配对 McNemar p=0.003，留出验证 λ 未过拟合），中位延迟 18.5 对 22.0 ms，而且同一个模型还能造词。
+  字级模型没有下岗，它是移动端「光标联想」那类 `P(下一段 | 前文)` 功能的基础——P2C 的 `<eos>` 明确切断上文，结构上做不了那件事。
 
 Engine 侧在 `engine/rescoring/`：接了打分器就取 Viterbi 前 `RESCORE_PATHS` = 6 条路径按 `路径分 + λ·(神经分 − 静态二元分)` 重排（λ `NEURAL_WEIGHT` 0.5，
-个人 n-gram / 用户加分 / 代价不动），分走「前文 + 文本 → 神经分」缓存 `NeuralCache`；同步打分器（`with_sentence_scorer`，CLI 评测）当场补分，
+个人 n-gram / 用户加分 / 代价不动）。**神经分只决定名次，不写回 `Conversion::score`**：P2C 打的是 `log P(汉字 | 拼音)`，
+比静态分高十几二十 nat 且抬升随句长变化，写回去会污染跨读法的比较（拼写纠错的原样 vs 纠正、混输的头段 vs 整段），
+那两处的门槛都按静态尺度定；按贝叶斯展开也只在同一串按键下可比。分走「(前文, 按键) + 文本 → 神经分」缓存 `NeuralCache`（两个条件任一变了整张作废）；
+按键取的是**当前这批 patterns 覆盖的字母**而不是整个作用域——英文尾巴那条只转换 head，拿整段当条件会让它凭空背上没覆盖的字母；
+同步打分器（`with_sentence_scorer`，CLI 评测）当场补分，
 异步的（`with_async_sentence_scorer`，后台线程 `RescoreWorker`）查询不等模型：缺分的记下来，壳停键后 `request_rescoring`、`poll_rescoring` 到了再 `query` 一次。
 前文优先用壳给的应用光标前文（`set_rescoring_context`），没有用本会话最近 64 个上屏字符。CLI `--neural <导出目录>`（`--neural-weight` / `--neural-context` / `--neural-async`）。
+
+P2C 教师强制打分 `CharScorer::score_p2c(keys, texts)`：前缀 `<eos> + 完整拼音 + <sep>`，只累加候选字符的 log 概率（不计 EOS），
+共享拼音前缀 KV，候选批量前向；超过上下文时报错，不截断拼音。CLI 实验入口 `--eval-p2c data/models/hanzhang-tongbian/hanzhang-tongbian-small.qjm --eval-text data/eval/sentences.tsv`，
+用 `--neural-weight` 调 λ。评测适配器与产品端 `P2cScorer` 同一条件，只是推理出错时直接终止（不静默回退到基线冒充成功）。
+`--eval-details <输出.jsonl>` 为任意整句评测保存逐句首选、整句候选、全部候选与查询耗时，支持配对比较，仍不上屏、不学习。
+
+P2C 自由生成实验：`--eval-text <集> --eval-generate data/models/hanzhang-tongbian/hanzhang-tongbian-small.qjm`（`P2c::convert` 束宽 5，不经词图不经重排），
+量的是重排这层架构的上限代价；2081 句上首选 51.9% / 前五 73.5%，对比重排路径的 42.3% / 45.5%，两条路互补（只有生成对 16.5%、只有重排对 6.9%），
+代价是 `O(生成字数)` 次串行前向。数字与取舍见 [neural-rescoring.md](neural-rescoring.md)。
+
+**模型直接生成的整句**（`engine/query/generating.rs`，候选类型 `CandidateKind::Generated`）：词图只会把整段按键读成拼音，
+中英混输（`yongdockerbushuhenfangbian`）与生词在它那里根本没有路径，出来的只能是把英文段硬读成拼音的废话（用的哦乘客仍不熟很方便）。
+词图读不通整段时改问 `SentenceScorer::generate`（P2C 走 `P2c::convert`，字级模型返回空），生成的整句插在词图那几条前面。
+「读不通」三条：最优切分里有不完整音节、切分没覆盖到末尾（`woyongvscodexiedaima` 的 `v` 起不了音节）、拼写纠错生效
+（`womaileyigeiphone` 的 `phone` 被当成敲错的 `paone`）。拼音干净的输入一条都不触发，常态零成本；
+异步打分器下走同一次 `request_rescoring`（`Job.generate`），按键回调不等它。
+`GENERATE_BEAM` = 5、`GENERATE_MAX_CHARS` = 32、`GENERATED_CANDIDATES` = 2、`MIN_GENERATED_LETTERS` = 6；双拼 / 注音不走（按键不是模型见过的字母）。
+生成的候选没有音节对齐，上屏吃掉整段作用域、不记学习。漏的是「英文词本身就是合法拼音」那种（`zhegeapihenhaoyong` 的 `api` 读成 `a pi`），
+光看切分分不出来。
+
+整句候选不止一条：`SENTENCE_CANDIDATES` = 3 条，重排后的前几条路径都进候选表，四个音节
+（`ALTERNATE_MIN_SYLLABLES`）以下不给备选（那几格留给词级候选）。冻结集上前三 42.4% → 45.5%，无模型时 38.1% → 43.2%。
+`Engine::sentence_paths` 的 `want` 参数控制算几条：拼写纠错对每个纠正候选都要转一次，那条路仍然只算一条。
+
+冷启动字词实验：`--eval-cold <样本.jsonl> --cold-output <新结果.jsonl>` 强制用缺省配置与内存学习器，
+与 `--config` / `--user-dict` / `--predict` / `--replay` 等冲突，不加载或删除个人数据。
+每行样本字段 `id/text/keys/source/category`；按完整拼音查候选，不给上文、不上屏，解析失败也记录在分母中。
+领域词库用 `--extra-dict` 显式指定，`--neural` 可测字级重排；`--cold-model` 可同时测 P2C beam 5、固定上限 16 字的生成。
+实验合并策略保留原首选，将生成的新增汉字候选插在其后，再接原候选；保存全部候选、词库文本/读音覆盖及耗时。
+该策略只量候选覆盖和排序代价，没有改产品行为。生成搜索不读取目标字数，候选输出拒绝覆盖已有文件。
 
 ## crates/qingjian-lm
 
@@ -136,19 +182,25 @@ Engine 侧在 `engine/rescoring/`：接了打分器就取 Viterbi 前 `RESCORE_P
 （`[aux_code] disabled` 是黑名单，`[general] aux_code_key` 缺省 `;` 且校验后退回缺省、`aux_code_show` 是显示码开关）；
 `protocol` 模块是 Windows Server ↔ TSF DLL 的 IPC 协议类型
 （`ClientMessage` / `ServerMessage` / `Frame` / `PreeditSegment`，全 serde，两端共用，见 `docs/design/architecture.md`「Windows：TSF」；
-`PROTOCOL_VERSION` = 7（v7 加任务栏图标右键菜单的 `Indicator`），`PreeditKind::AuxCode` 对应 Core 的 `MarkedKind::AuxCode`，`Frame.aux_code_show` 随帧下发显示码开关）。
+协议版本见 `PROTOCOL_VERSION`，`PreeditKind::AuxCode` 对应 Core 的 `MarkedKind::AuxCode`，`Frame.aux_code_show` 随帧下发显示码开关）。
 
 ## crates/qingjian-render
 
-横排矩阵：`Frame::columns` 不为 0 时 `Layout::Horizontal` 走 `renderer/matrix.rs`（列宽用帧里的 `column_ems`，Core `Grid::column_ems` 按整份候选估、
-单格封顶 `MAX_CELL_EMS` = 4 字宽，滚动时窗口不跳；网格下固定一行信息，放不下的截断）；视口与高亮移动在 Core `candidate::layout::Grid`（`GRID_ROWS` = 6），
-预览示例里有 `matrix-horizontal` 场景。mac 壳里这套按键由 `[general] horizontal_grid`（缺省关）加横排两个条件一起开（`Host::grid_keys`）。
+横排矩阵：视口与高亮移动在 Core `candidate::layout::Grid`（`GRID_ROWS` = 6，列宽 `Grid::column_ems` 按整份候选估、单格封顶 `MAX_CELL_EMS` = 4 字宽）。
+**青简渲染器还不会画矩阵**：main 上的 `renderer/matrix.rs` 建在手算坐标的旧渲染器上，合进主题分支时随旧渲染器删了，场景树这边要另做一个矩阵窗口模板
+（固定列宽、超宽截尾、网格下一行信息）；移植之前 mac 壳只在系统绘制下展开矩阵（`Host::grid_keys` 多一个 `!uses_bitmap()` 条件），`Frame::columns` / `column_ems` 渲染器暂时不读。
 
-自绘渲染器：候选窗一帧 + 主题 → 预乘 RGBA 位图，tiny-skia 栅格 + cosmic-text 文字（fontdb 按平台清单只加载几个字体文件、不扫系统），
-自己解析 `trak` 字距表、按主题 gamma 加深笔画；cosmic-text 打了 `opsz` 光学字号补丁（qingjian-team/cosmic-text 分支 `qingjian-opsz`，workspace `[patch.crates-io]` 钉 rev）。
-`examples/preview.rs` 出 PNG 与真机截图并排比、`--measure` 与 AppKit 对宽度。mac 壳 `candidates/bitmap/` 贴位图，`[general] renderer = "system"` 切回 AppKit 绘制
+自绘渲染器：候选窗一帧 + 主题 → 预乘 RGBA 位图。主题是 `themes/<id>/theme.json`（内置青简绿 / 系统蓝 / 微信绿 / 樱花编进 crate；新增内置主题前先查主题仓库 qingjian-themes 有没有同名 id，加了之后同步它 `tools/check.py` 的 `RESERVED_IDS`，否则那个用户主题会被拒绝加载；图片也可以 `include_bytes!` 编进去（`BUILTINS` 的文件表），`Theme::builtin(id)` / `builtins()` 取；没写 `extends` 的主题都以青简绿为底（`theme/mod.rs` 的 `ROOT_THEME`），用户主题还能取到所继承内置主题的图片；用户主题在 `<数据目录>/themes/<id>/theme.json`，`ThemeLibrary` 合并并按目录戳热加载；`theme/file/` 是 serde 模型，`theme/jsonc.rs` 解析前去掉注释与尾逗号，格式见 `docs/design/theme.md`「格式（schema 1）」），`renderer/build/` 按模板实例化场景树（`scene/`：Taffy 布局树 + 每节点一个 `Visual`，竖排三列用 grid、其余 flex，高亮条与光标绝对定位；布局不取整，文字测量按节点缓存；表格一行里的格子按第一段文字的基线对齐，`scene/baseline.rs` 补上边距再排一遍），再按树序画（节点的投影 / 内阴影在 `scene/draw/effect.rs`：把节点自己的画面画进离屏图取 alpha，三遍盒式模糊；窗口阴影就是根节点的投影；位图按 `scene/extent.rs` 并出的画出范围开（投影、描边、负 inset 伸出窗口的装饰都在里面），壳按 `Rendered::content_*` 对齐，mac 面板关系统阴影；`Rendered::hits` 是候选与各条译词的点击区域（`renderer/hit/`，译词按义项分隔数分条，横排底下那行算高亮候选的），壳只在这些区域收鼠标、其余穿透）；过渡在 `animation/`（缓动、插值）与 `renderer/{animate,retained}.rs`：`Renderer` 留住上一帧，按节点 `id` 配对算过渡，`Rendered::next_frame` 告诉壳多久后调 `tick`（mac `candidates/animation.rs` 的 NSTimer、Windows UI 线程消息循环截 `WM_TIMER`），窗口收起调 `forget`；动画帧只重画、不重建树，效果遮罩与图片框按键缓存（`scene/cache_key.rs`）；循环动画 `animation/keyframes.rs` 求姿态，带姿态节点整棵子树画进缓存小图再变换贴上，循环帧走局部重画（`renderer/partial.rs` + `scene/split.rs` 分段模式）；tiny-skia 栅格 + cosmic-text 文字（fontdb 按平台清单只加载几个字体文件、不扫系统；
+脚本字体文件要先过轮廓检查，任一面带 `glyf` / `CFF ` 才加载——macOS 26+ 的苹方换成私有 `hvgl` 可变轮廓，swash 读不出字形，
+这种文件跳过，简体回退到 Songti.ttc），
+自己解析 `trak` 字距表、按主题 gamma 加深笔画；主题样式的字族在 `theme/font/families.rs` 去重成字族表（样式里存序号），`TextPainter::use_families` 换主题时给每条链挑装了的字族，主题要的系统字族由壳查文件经 `Renderer::load_theme_fonts` 加载（mac 同 `bitmap/font_files.rs`、Windows 同 `system_fonts::family_files`），随主题带的字体在 `theme/assets.rs` 核路径；主题图片 `.svg` 结尾的走 `theme/svg_image.rs`（resvg 0.48，与渲染器同一个 tiny-skia，关掉 text / raster-images 与外部文件读取），画时按像素尺寸栅格并缓存；cosmic-text 打了 `opsz` 光学字号补丁（qingjian-team/cosmic-text 分支 `qingjian-opsz`，workspace `[patch.crates-io]` 钉 rev）。
+`examples/preview.rs` 出 PNG 与真机截图并排比、`--measure` 与 AppKit 对宽度、`--theme <目录>` 画用户主题（系统字族在 `--font-dir` 里按名字找）。
+快照测试 `tests/snapshots.rs`：`tests/scenes/` 的样例帧（与 preview 共用）逐像素比 `tests/snapshots/<os>/` 的基准，字体环境（`fingerprint.txt`）对不上或没有基准时跳过；
+改了渲染就 `QINGJIAN_UPDATE_SNAPSHOTS=1 cargo test -p qingjian-render --test snapshots` 重出基准，变了的 PNG 看过再提交，失败时差异图在 `target/tmp/render-snapshots/`。mac 壳 `candidates/bitmap/` 贴位图，`[general] renderer = "system"` 切回 AppKit 绘制
 （过渡期退路，偏好设置「候选窗口」页可选）；`[general] font` 是候选窗字族名（空为系统字体，`bitmap/font_files.rs` 用 CoreText 按字族名找文件只加载那几个，没装就回系统字体；
 设置页 `preferences/font_picker/` 是搜索框 + 列表）。设计与验收见 `docs/design/rendering.md`。
+
+主题预览图（`preview/`）：`preview::write_previews` 用 `sample.rs` 的 nihao 两帧把主题目录画成 2 倍的 `vertical.png` / `horizontal.png`（没锁定外观再加 `vertical-dark.png`），单张失败只记在它的 `Shot` 里；`preview::run` 是两个壳 `--theme-preview <主题目录>` 的入口（mac `main.rs`、Windows Server `main.rs`，Windows release 是 GUI 子系统，直接从 cmd 跑时先 `AttachConsole` 挂父进程控制台），写进 `<主题目录>/preview/`。主题仓库的 `tools/preview.py` 找本机装的青简调它，旧版不认参数会照常起服务，脚本 30 秒超时按版本太旧提示。
 
 ## crates/qingjian-update
 
@@ -193,16 +245,16 @@ IMK 输入法，源码按 `app / host / imk / candidates / menubar / preferences
 - 日志在 `~/Library/Logs/Qingjian/`（按天分文件留 7 天，删了会重建），用户数据与配置在 `~/Library/Application Support/Qingjian/`。
 - 配置项：云联想 `[predict]`（偏好设置「云服务」页有「测试连接」按钮：`qingjian_predict::ConnectionTest` 起线程发一条最小请求，`Host` 用独立定时器 `CloudTestMonitor` 轮询结果显示到窗口底部；
   `reasoning_effort` 缺省 `none`，DeepSeek V4 默认思考，不关正文为空）；模糊音 `[fuzzy]` 默认都关；`[general]` 学习语言（`off` 不显示译文）/ 每页候选数 / 翻页键 / 外观 / 竖排横排 / 拼音显示位置 /
-  英文模式候选开关 / 中文优先 `chinese_first` / 双拼方案 `shuangpin`（小鹤 / 自然码 / 微软 / 搜狗 / 智能ABC / 小浪 / 首道，空为全拼）/ 日志级别 `log_level`（缺省 info 不含敲的内容，debug 逐键记，热切换）/ 输入日志 `input_log`；
+  英文模式候选开关 / 中文优先 `chinese_first` / 中文模式英文词 `english_in_chinese`（`Engine::set_english_in_chinese`）/ emoji 候选 `emoji`（`Engine::set_emoji_candidates`）/ 双拼方案 `shuangpin`（小鹤 / 自然码 / 微软 / 搜狗 / 智能ABC / 小浪 / 首道，空为全拼）/ 日志级别 `log_level`（缺省 info 不含敲的内容，debug 逐键记，热切换）/ 输入日志 `input_log`；
   `[shortcut]` 模式键 v / u、`question_mark`（缺省关，开了空缓冲区敲 `?` 进问字）、上屏第一 / 第二个译词的修饰键 `translation` / `translation_second`、删候选 `delete_candidate`（缺省 shift，用户词整删、词库词清学习）、翻译选中文字 `translate_selection`；
-  `[apps] english_candidates_off` 按 bundle identifier 列出英文模式不给候选的应用（缺省终端 / 编辑器 / IDE，`*` 前缀匹配）；
+  `[apps] english_candidates_on` 按应用标识列出英文模式给候选的应用（白名单，缺省浏览器 / 聊天 / 办公 / 笔记，`*` 前缀匹配，`["*"]` 处处都给），`english_candidates_off` 从中排除；
   `[dictionaries] domains` 打开随包的领域词库（`Resources/dicts/` 11 本，缺省只开 `idioms`），`disabled` 关掉用户目录 `dicts/` 里的某本导入词库；
   偏好设置「词库」页随包的可开关、导入的可开关 / 移除，可导入 TSV / Rime yaml / .qj。
 - 系统文本替换（系统设置「键盘 → 文本替换」）：`host/config/text_replacements.rs` 从 `NSUserDefaults` 全局域读 `NSUserDictionaryReplacementItems`
   （每条 `{ on, replace, with }`），激活输入法时重读，变了就经 Core `merge_replacements` 并进配置里的自定义短语再 `set_custom_phrases`；
   `[general] system_text_replacements` 开关（缺省开，「自定义短语」页勾选框），内容可能含证件号、地址，日志只记条数。
 - 输入法进程由 launchd 拉起，看不到 shell 的环境变量：密钥写进配置同目录的 `.env`（`QINGJIAN_API_KEY=...`，输入法启动时 dotenvy 读入）或 `config.toml` 的 `api_key`。
-- 本地整句模型：`bundle.sh` 把 `data/model/`（或 `QINGJIAN_MODEL_DIR`）三件套打进 `Resources/model/`，用户目录 `model/` 优先；`host/model/mod.rs` 在后台线程加载并预热（首次 Metal 编译）后
+- 本地整句模型：`bundle.sh` 把 `data/models/hanzhang-tongbian/`（或 `QINGJIAN_P2C_MODEL_DIR`）打进 `Resources/models/hanzhang-tongbian/`，通变优先；知微放 `Resources/models/hanzhang-zhiwei/` 作回退，用户目录的对应模型优先于随包同类模型，旧用户目录仍可读取。`host/model/mod.rs` 在后台线程加载并预热（首次 Metal 编译）后
   `set_async_sentence_scorer` 接上，`refresh` 每键先读应用光标前 64 字给 Engine 当前文、查询后 `schedule_rescoring`，`RescoreMonitor` 停键 80 ms 请求、20 ms 轮询，
   结果到了重查一次只重画当前页（翻过页 / 动过高亮不动）；「云服务」页有开关（`[model] enabled`）。
 - 端到端验证可用 `osascript` 的 System Events 往 TextEdit 发按键再读回文本（终端需要辅助功能权限；输入法得在中文模式）。
@@ -259,7 +311,7 @@ DLL 不读文件、不查 mtime。`SessionOpened` 只回过协议版本对得上
 ## tools/gloss-gen
 
 用 LLM 批量生成释义表：`cargo run --release -p qingjian-gloss-gen -- generate`（密钥读 `QINGJIAN_API_KEY`，结果 JSONL 在 `data/generated/`，不进 git、可续跑，`--limit 80` 试跑）
-再 `... export`（写 `glossary-{en,ja}.tsv`，产品数据在 `assets/glossary/`，见那里的 README；格式 `词\t词性. 译词[|假名]`）。CLI 与 bundle.sh 用的就是这两个文件。
+再 `... export`（写 `glossary-{en,ja,vi}.tsv`，产品数据在 `assets/glossary/`，见那里的 README；格式 `词\t词性. 译词[|假名]`）。只补越南语时 `generate --languages vi --out data/generated/gloss-vi-llm.jsonl`，再对这个 JSONL `export`。CLI 与 bundle.sh 用的是这些文件；打包时 `dict-convert pack glossary --language vi` 会写 `glossary-vi.qj`。
 
 ## tools/dict-convert
 
@@ -267,7 +319,7 @@ DLL 不读文件、不查 mtime。`SessionOpened` 只回过协议版本对得上
 
 - `lexicon`：从 `assets/lexicon/`（自建词库源：规范字 + 常用词 + THUOCL 领域词）加 Unihan 读音（`data/unihan/Unihan_Readings.txt`）、LLM 多音字标注（`gloss-gen pinyin`，
   结果 `data/generated/pinyin-llm.jsonl`，不进 git）、语料词频（`lm-unigram.tsv`）建基础词库 `dict.tsv`（8.7 万条），并把 THUOCL 领域词按语料次数 < 50 拆成
-  `dicts/<领域>.tsv` + `.qj`（11 本、13 万条，`--domain-keep-min`），流程见 `assets/lexicon/QINGJIAN.md`；`--extra-words` 并入人工挑的领域词 `assets/lexicon/domain_words.tsv`。
+  `dicts/<领域>.tsv` + `.qj`（11 本、13 万条，`--domain-keep-min`），流程见 `assets/lexicon/QINGJIAN.md`；Unihan 只给 `n` / `ng` 的字（嗯）按输入习惯收成 `en`；`--extra-words` 并入人工挑的领域词 `assets/lexicon/domain_words.tsv`（2026-09-27 起该文件另含按 jieba 词表（MIT）对照出的缺失高频词：读音逐字取 Unihan、多音字逐条人工判定（判定明细与理由在 `assets/lexicon/00_meta/polyphone-judgments.tsv`），词频按 log-log 回归从 jieba 次数折算；另含「姓氏+总」称谓层 98 条与符号词 6 条，定值依据见文件头注。这些词进语言模型同样走 `bigram --phrases`，改了词库发数据时要重跑 bigram，否则新词只拿兜底分、会被同音的 lm 词压过）。
 - `english`：转 `assets/lexicon/05_english/00_all_words.tsv`；同编码优先保留含大写的专名写法（Windows ≠ windows），
   展示写法补充表 `07_display_forms.tsv` 后置读入；`cedict`：释义表备用来源。中英混杂词源在 `assets/lexicon/mixed_words.tsv`（`lexicon --extra-words`）。
 - `wubi`：Rime 形码码表（`.dict.yaml`，极点 86 五笔）→ `词\t编码\t词频`（`wubi.rs`，`--name` 决定文件名，缺省 `wubi86.tsv`）。
@@ -293,9 +345,9 @@ DLL 不读文件、不查 mtime。`SessionOpened` 只回过协议版本对得上
 ## apps/linux
 
 `qingjian-linux-server` 为独立产品 `0.1.0-dev`，装配本地 Engine、词库、释义、频率学习、个人 n-gram、词汇记录与可选输入日志，
-本地整句模型（`data/model/model.qjm`，用户 `~/.local/share/qingjian/model/` 优先）按 `[model] enabled` 在后台加载、停键 80 ms 后重排，节拍与 Windows Server 的 `dispatch/rescore` 相同；不接云服务。`dispatch/session` 交换每个上下文的 EngineSession；真正的能力变化丢弃输入，普通焦点切换隔离保存。
+本地整句模型优先加载用户 `~/.local/share/qingjian/models/hanzhang-tongbian/` 或随包 `data/models/hanzhang-tongbian/`，缺失时回退 `models/hanzhang-zhiwei/`；旧用户目录兼容读取。按 `[model] enabled` 在后台加载、停键 80 ms 后重排，节拍与 Windows Server 的 `dispatch/rescore` 相同；不接云服务。`dispatch/session` 交换每个上下文的 EngineSession；真正的能力变化丢弃输入，普通焦点切换隔离保存。
 默认面板插件仅转换事件，Shift 模式、候选点击、分页和失焦提交都由 Server 决定。
 
-Unix socket 用共享长度前缀与 Frame（当前公共版本 7，与 `PROTOCOL_VERSION` 同步，Fcitx5 插件里写死在 `qingjian.cpp` 的 OpenSession）；插件复用一条连接，每个上下文独立会话。Linux v3 扩展逐会话握手、确认 Sensitive/Password/Disable 后接受按下/释放、焦点和点击事实。
+Unix socket 用共享长度前缀与 Frame（当前公共版本 8，与 `PROTOCOL_VERSION` 同步，Fcitx5 插件里写死在 `qingjian.cpp` 的 OpenSession）；插件复用一条连接，每个上下文独立会话。Linux v3 扩展逐会话握手、确认 Sensitive/Password/Disable 后接受按下/释放、焦点和点击事实。
 候选回报绑定连接代次、上下文和服务端帧序号，仅当前聚焦页的有效释义进入 `note_displayed`，不把生成帧算作已展示。
 `[general] preedit` 使用已有 `both` / `inline` / `window`；没有新增 Linux 自绘配置。详见 [linux-fcitx5.md](linux-fcitx5.md)。

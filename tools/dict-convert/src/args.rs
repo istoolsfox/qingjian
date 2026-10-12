@@ -189,14 +189,14 @@ pub enum Command {
     MmhReference(MmhReferenceOptions),
 
     /// 把 TSV 打包成 `.qj` 容器（mmap 直接用，启动近零耗时）：`dict` 读 dict.tsv 写 dict.qj，`lm` 读 lm-unigram/bigram.tsv 写 lm.qj，
-    /// `glossary --language en` 读 glossary-en.tsv 写 glossary-en.qj；`model` 把训练仓库导出的三件套目录（缺省 data/model）
-    /// 打成一个 model.qjm（`--out-dir data/model` 就写回原目录，随包只带这一个文件）；
+    /// `glossary --language en` 读 glossary-en.tsv 写 glossary-en.qj；`model` 把导出的三件套目录（缺省 data/models/hanzhang-zhiwei）
+    /// 打成一个 .qjm（`--out-dir data/models/hanzhang-zhiwei` 就写回原目录，随包只带这一个文件）；
     /// `codes` 是唯一不「原样落盘」的一种：读笔画表与词库，按取码规则算成本地码表 codes/stroke.qj（见 codes 模块）
     Pack {
         /// 打包哪种数据
         kind: PackKind,
 
-        /// 输入文件；`dict` 一个 TSV，`lm` 两个（一元表、二元表），`model` 一个目录。缺省从输出目录里找同名 TSV（`model` 缺省 data/model）
+        /// 输入文件；`dict` 一个 TSV，`lm` 两个（一元表、二元表），`model` 一个目录。缺省从输出目录里找同名 TSV（`model` 缺省 data/models/hanzhang-zhiwei）
         #[arg(long, num_args = 1..)]
         input: Vec<PathBuf>,
 
@@ -208,7 +208,7 @@ pub enum Command {
         #[arg(long)]
         dict: Option<PathBuf>,
 
-        /// `codes` 用：码表产物；缺省 <输出目录>/codes/stroke.qj
+        /// `codes` 或 `model` 用：输出文件；模型缺省 <输出目录>/model.qjm
         #[arg(long)]
         output: Option<PathBuf>,
 
@@ -232,7 +232,7 @@ pub enum Command {
         #[arg(long, default_value = "")]
         data_version: String,
 
-        /// `glossary` 专用：释义表的语言代码（en / ja / zh / es），决定输出文件名 glossary-<语言>.qj
+        /// `glossary` 专用：释义表的语言代码（en / ja / zh / es / vi），决定输出文件名 glossary-<语言>.qj
         #[arg(long, default_value = "en")]
         language: String,
     },
@@ -250,7 +250,7 @@ pub enum PackKind {
     /// 释义表（glossary-<语言>.tsv → glossary-<语言>.qj）
     Glossary,
 
-    /// 本地整句模型（三件套目录 → model.qjm）
+    /// 本地整句模型（三件套目录 → .qjm）
     Model,
 
     /// 笔画码表（笔画表 + 词库 → codes/stroke.qj，随包原生码表）

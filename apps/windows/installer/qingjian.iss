@@ -83,14 +83,16 @@ Source: "{#Repo}\data\generated\glossary-en.qj"; DestDir: "{app}\data\generated"
 Source: "{#Repo}\data\generated\glossary-ja.qj"; DestDir: "{app}\data\generated";       Flags: ignoreversion
 Source: "{#Repo}\data\generated\glossary-zh.qj"; DestDir: "{app}\data\generated";       Flags: ignoreversion
 Source: "{#Repo}\data\generated\glossary-es.qj"; DestDir: "{app}\data\generated";       Flags: ignoreversion
+Source: "{#Repo}\data\generated\glossary-vi.qj"; DestDir: "{app}\data\generated";       Flags: ignoreversion
 Source: "{#Repo}\data\generated\english.tsv";    DestDir: "{app}\data\generated";       Flags: ignoreversion
 Source: "{#Repo}\data\generated\dicts\*.qj";     DestDir: "{app}\data\generated\dicts";  Flags: ignoreversion
 ; —— 随包辅码码表（笔画，开箱可用）：Server 扫 data\generated\codes\；CNS11643 筆順資料派生，署名见「关于」页 ——
 ;    缺表时不阻塞打包（skipifsourcedoesntexist），但发布前应先跑 dict-convert pack codes 生成它
 Source: "{#Repo}\data\generated\codes\*.qj";   DestDir: "{app}\data\generated\codes"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#Repo}\assets\stroke\LICENSE-CNS11643.txt"; DestDir: "{app}\data\generated\codes"; Flags: ignoreversion
-; —— 本地整句模型（tools/release/pack-model.sh 打成的单文件 data\model\model.qjm；没有就不装，Server 不重排）——
-Source: "{#Repo}\data\model\model.qjm"; DestDir: "{app}\data\model"; Flags: ignoreversion skipifsourcedoesntexist
+; —— 含章·知微与含章·通变模型 ——
+Source: "{#Repo}\data\models\hanzhang-zhiwei\hanzhang-zhiwei-small.qjm"; DestDir: "{app}\data\models\hanzhang-zhiwei"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#Repo}\data\models\hanzhang-tongbian\hanzhang-tongbian-small.qjm"; DestDir: "{app}\data\models\hanzhang-tongbian"; Flags: ignoreversion skipifsourcedoesntexist
 ; —— 随 git 的资源 ——
 Source: "{#Repo}\assets\emoji\emoji-zh.tsv";     DestDir: "{app}\assets\emoji";  Flags: ignoreversion
 Source: "{#Repo}\assets\emoji\emoji-en.tsv";     DestDir: "{app}\assets\emoji";  Flags: ignoreversion
@@ -144,7 +146,7 @@ Filename: "{syswow64}\regsvr32.exe"; Parameters: "/u /s ""{app}\{#TsfDll32}"""; 
 [InstallDelete]
 ; 更早版本装在当前用户「启动」文件夹里的自启快捷方式：与机器级那份并存会起两个 Server（两条状态条）。
 Type: files; Name: "{userstartup}\Qingjian Server.lnk"
-; 更早版本装的模型三件套（现在只带 model.qjm）：留着白占 56 MB。
+; 更早版本装的模型三件套（现在只带正式命名的 .qjm）：留着白占 56 MB。
 Type: files; Name: "{app}\data\model\model.safetensors"
 Type: files; Name: "{app}\data\model\config.json"
 Type: files; Name: "{app}\data\model\vocab.json"

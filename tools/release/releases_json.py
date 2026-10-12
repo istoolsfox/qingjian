@@ -50,7 +50,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-HEADING = re.compile(r"^##\s+(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)\s*·\s*(?P<date>\d{4}-\d{2}-\d{2})\s*·\s*(?P<channel>\S+)\s*$")
+HEADING = re.compile(r"^##\s+(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)\s*·\s*(?P<date>\d{4}-\d{2}-\d{2}|未发布)\s*·\s*(?P<channel>\S+)\s*$")
 MIRROR_LINE = re.compile(r"^网盘[：:]")
 MIRROR_LINK = re.compile(r"\[(?P<name>[^\]]+)\]\((?P<url>https?://[^)\s]+)\)")
 TAG = re.compile(r"^(?:(?:macos|windows|linux)-)?v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)$")
@@ -80,9 +80,12 @@ def parse_changelog(path: Path) -> dict[str, dict]:
         if line.startswith("## "):
             m = HEADING.match(line)
             if not m:
-                sys.exit(f"CHANGELOG 标题格式不对，应为「## 版本 · YYYY-MM-DD · 渠道」：{line}")
+                sys.exit(f"CHANGELOG 标题格式不对，应为「## 版本 · YYYY-MM-DD/未发布 · 渠道」：{line}")
             if m["channel"] not in CHANNELS:
                 sys.exit(f"渠道只能是 {' / '.join(CHANNELS)}：{line}")
+            if m["date"] == "未发布":
+                current = None
+                continue
             current = {"date": m["date"], "channel": m["channel"], "notes": [], "mirrors": []}
             entries[m["version"]] = current
         elif current is not None and line.startswith("- "):

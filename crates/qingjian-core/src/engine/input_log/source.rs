@@ -43,7 +43,8 @@ impl From<CandidateKind> for InputSource {
             // 形码的词也是词库里的词，输入日志的来源不另分（方案记在别的字段）
             CandidateKind::Chinese | CandidateKind::Code => Self::Word,
             CandidateKind::Cloud => Self::Cloud,
-            CandidateKind::Sentence => Self::Sentence,
+            // 模型直接生成的也是整句，回放时与词图出的整句同一类看
+            CandidateKind::Sentence | CandidateKind::Generated => Self::Sentence,
             CandidateKind::English => Self::English,
             CandidateKind::Shortcut => Self::Shortcut,
             CandidateKind::Custom(_) => Self::Custom,

@@ -29,7 +29,7 @@ CTest 的 `real-server` 实际运行 Rust Server 并通过 InputContext 输入�
 
 同用户 Unix socket，长度前缀为 4 字节小端，单消息上限 16 MiB；每次插件收发共用 200 ms 截止时间。
 插件只持有一条连接和一个 I/O watcher，每个 InputContext 分配独立、递增的 session ID。
-每个会话先 `OpenSession` 校验共享协议版本（6），再协商 `LinuxHello` v3，携带 session/generation/context，返回会话编号和既有预编辑设置。
+每个会话先 `OpenSession` 校验共享协议版本（`PROTOCOL_VERSION`），再协商 `LinuxHello` v3，携带 session/generation/context，返回会话编号和既有预编辑设置。
 首次能力确认前不接受输入；握手与能力状态逐会话保存。同一连接支持超过 64 个上下文，64 条连接的资源保护不限制单连接会话数。
 Linux 的首个回包仍是含 `linux_ui` 的 `Update`，不额外发送 Windows DLL 使用的 `SessionOpened`；旧版插件的协议 5 连接会被拒绝，升级时需同时更新 Server 与插件。
 旧版本或损坏响应关闭连接、清空显示并放行当前输入；重连创建全新输入状态，旧提交不会重放。
@@ -55,7 +55,7 @@ FocusOut 的行内预编辑由框架或声明 ClientUnfocusCommit 的客户端�
 
 ## 本地整句模型
 
-Server 启动时按 `[model] enabled`（缺省开）在后台线程加载模型并预热，`find_model` 先找用户目录 `~/.local/share/qingjian/model/`，再找随包的 `resources/data/model/`；Linux 没有配置热加载，改开关要重启服务。
+Server 启动时按 `[model] enabled`（缺省开）在后台线程加载模型并预热，`find_model` 优先找用户目录 `~/.local/share/qingjian/models/hanzhang-tongbian/` 与随包的 `resources/data/models/hanzhang-tongbian/`，然后回退知微；旧用户目录仍可读取。Linux 没有配置热加载，改开关要重启服务。
 节拍与 Windows Server 的 `dispatch/rescore` 相同：缓冲变化后起 80 ms 防抖，到点把整句路径送去后台打分，每 20 ms 收一次，最长等 2 s；
 结果到了只在用户还看着第一页、没动过高亮时重建候选布局，下一次 `Poll` 回的帧就是新顺序。主循环按 `Router::next_tick` 的绝对到点时间等消息，空闲时一秒一次落盘学习。
 模型在后台接上时用户正在组句，Server 补查一次攒下整句路径再起防抖，这一轮不错过重排。前文用本会话最近上屏的字，首版不读应用光标前文。

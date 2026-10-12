@@ -93,26 +93,39 @@ if [[ -f data/generated/dict.tsv || -f data/generated/dict.qj ]]; then
     cp data/generated/dicts/*.qj "$APP/Contents/Resources/dicts/"
   fi
   [[ -f data/generated/lm.qj ]] && cp data/generated/lm.qj "$APP/Contents/Resources/"
-  # 本地整句模型（字级 Transformer）：训练仓库 ../train 导出三件套到 data/model/，tools/release/pack-model.sh 打成 model.qjm，
-  # 随包只带这一个文件放 Resources/model/（三件套比 .qjm 新就重打）；什么都没有就不重排
-  model_dir="${QINGJIAN_MODEL_DIR:-data/model}"
+  # 含章·知微（字级 Transformer）：三件套与单文件放 data/models/hanzhang-zhiwei/。
+  model_dir="${QINGJIAN_MODEL_DIR:-data/models/hanzhang-zhiwei}"
   if [[ -f "$model_dir/model.safetensors" ]]; then
     QINGJIAN_MODEL_DIR="$model_dir" tools/release/pack-model.sh
   fi
-  if [[ -f "$model_dir/model.qjm" ]]; then
-    mkdir -p "$APP/Contents/Resources/model"
-    cp "$model_dir/model.qjm" "$APP/Contents/Resources/model/"
-    chmod 644 "$APP/Contents/Resources/model/model.qjm"
-    echo "打包本地整句模型：$model_dir/model.qjm"
+  if [[ -f "$model_dir/hanzhang-zhiwei-small.qjm" ]]; then
+    mkdir -p "$APP/Contents/Resources/models/hanzhang-zhiwei"
+    cp "$model_dir/hanzhang-zhiwei-small.qjm" "$APP/Contents/Resources/models/hanzhang-zhiwei/"
+    chmod 644 "$APP/Contents/Resources/models/hanzhang-zhiwei/hanzhang-zhiwei-small.qjm"
+    echo "打包含章·知微：$model_dir/hanzhang-zhiwei-small.qjm"
+  fi
+  # 含章·通变（P2C，带噪拼音 → 汉字）：放 Resources/models/hanzhang-tongbian/。
+  p2c_dir="${QINGJIAN_P2C_MODEL_DIR:-data/models/hanzhang-tongbian}"
+  if [[ -f "$p2c_dir/model.safetensors" ]]; then
+    QINGJIAN_MODEL_DIR="$p2c_dir" tools/release/pack-model.sh
+  fi
+  if [[ -f "$p2c_dir/hanzhang-tongbian-small.qjm" ]]; then
+    mkdir -p "$APP/Contents/Resources/models/hanzhang-tongbian"
+    cp "$p2c_dir/hanzhang-tongbian-small.qjm" "$APP/Contents/Resources/models/hanzhang-tongbian/"
+    chmod 644 "$APP/Contents/Resources/models/hanzhang-tongbian/hanzhang-tongbian-small.qjm"
+    echo "打包含章·通变：$p2c_dir/hanzhang-tongbian-small.qjm"
   fi
   # 释义表打成 .qj（TSV 比 .qj 新时重打），英文词表仍是 TSV。各表来源不同，元数据按表写（见 assets/glossary/README.md）
-  for lang in en ja zh es; do
+  for lang in en ja zh es vi; do
     src="assets/glossary/glossary-$lang.tsv"
     out="data/generated/glossary-$lang.qj"
     [[ -f "$src" ]] || continue
     if [[ "$lang" == es ]]; then
       license="GPL-3.0-or-later"
       attribution="Azure Translator 机器翻译（Tofuzhu，tools/corpus/glossary_es.py）"
+    elif [[ "$lang" == vi ]]; then
+      license="GPL-3.0-or-later"
+      attribution="LLM 生成（gpt-5.5），qingjian-gloss-gen"
     else
       license="MIT"
       attribution="LLM 生成（DeepSeek），qingjian-gloss-gen"
@@ -195,10 +208,14 @@ if [[ "${1:-}" == "--install" ]]; then
     echo "注意: /Library/Input Methods/$APP_NAME.app 也装着一份（pkg 装的），两份同 id 会互相顶；先跑 scripts/uninstall.sh"
   fi
   mkdir -p "$INSTALL_DIR"
-  rm -rf "$INSTALL_DIR/$APP_NAME.app"
-  cp -R "$APP" "$INSTALL_DIR/$APP_NAME.app"
+  # 先整个拷到旁边再换上去：直接删了再拷，拷到一半中断会留下残缺的包，旧进程还在用它
+  STAGING="$INSTALL_DIR/.$APP_NAME.app.new"
+  rm -rf "$STAGING"
+  cp -R "$APP" "$STAGING"
   # 系统会在下次切换到该输入法时重新拉起进程
   pkill -x "$BIN_NAME" 2>/dev/null || true
+  rm -rf "$INSTALL_DIR/$APP_NAME.app"
+  mv "$STAGING" "$INSTALL_DIR/$APP_NAME.app"
   echo "已安装到: $INSTALL_DIR/$APP_NAME.app"
   echo "日志: ~/Library/Logs/Qingjian/"
 fi

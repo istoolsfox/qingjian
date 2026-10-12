@@ -24,11 +24,15 @@ use super::composed::Composed;
 /// 空闲时主循环多久醒一次：到点落盘学习数据。
 const IDLE_TICK: Duration = Duration::from_secs(1);
 
-/// 找模型（`.qjm` 单文件，或开发时的三件套目录）：用户目录 `model/` 优先（用户自己的模型），否则随包 `data/model/`；都没有为 `None`。
+/// P2C 优先，同类模型里用户目录优先；没有 P2C 才回退字级模型。
 pub fn find_model(user_dir: Option<&Path>, bundled_root: &Path) -> Option<PathBuf> {
     let candidates = [
+        user_dir.map(|dir| dir.join("models/hanzhang-tongbian")),
+        user_dir.map(|dir| dir.join("model-p2c")),
+        Some(bundled_root.join("data/models/hanzhang-tongbian")),
+        user_dir.map(|dir| dir.join("models/hanzhang-zhiwei")),
         user_dir.map(|dir| dir.join("model")),
-        Some(bundled_root.join("data/model")),
+        Some(bundled_root.join("data/models/hanzhang-zhiwei")),
     ];
     candidates
         .into_iter()
@@ -71,8 +75,8 @@ impl Router {
         match loader.poll() {
             Loaded::Pending => {}
             Loaded::Done(result) => {
-                match *result {
-                    Ok(scorer) => self.attach_sentence_scorer(Box::new(scorer)),
+                match result {
+                    Ok(scorer) => self.attach_sentence_scorer(scorer),
                     Err(error) => tracing::warn!(%error, "本地整句模型加载失败，不重排"),
                 }
                 self.model_loader = None;
@@ -179,5 +183,46 @@ impl Router {
         *cursor = query.marked_cursor();
         // 这次查询可能又记下了一批要打分的（缓存按前文记，前文没变时不会），再来一轮
         self.schedule_rescoring();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_model;
+
+    #[test]
+    fn p2c_precedes_old_model_and_user_precedes_bundled() {
+        let root =
+            std::env::temp_dir().join(format!("qingjian-model-choice-{}", std::process::id()));
+        let user = root.join("user");
+        let bundled = root.join("bundled");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let old = bundled.join("data/models/hanzhang-zhiwei/model.qjm");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, b"").unwrap();
+        assert_eq!(find_model(Some(&user), &bundled), Some(old));
+
+        let user_old = user.join("models/hanzhang-zhiwei/model.qjm");
+        std::fs::create_dir_all(user_old.parent().unwrap()).unwrap();
+        std::fs::write(&user_old, b"").unwrap();
+        assert_eq!(find_model(Some(&user), &bundled), Some(user_old));
+
+        let bundled_p2c = bundled.join("data/models/hanzhang-tongbian/model.qjm");
+        std::fs::create_dir_all(bundled_p2c.parent().unwrap()).unwrap();
+        std::fs::write(&bundled_p2c, b"").unwrap();
+        assert_eq!(find_model(Some(&user), &bundled), Some(bundled_p2c));
+
+        let user_p2c = user.join("models/hanzhang-tongbian/model.qjm");
+        std::fs::create_dir_all(user_p2c.parent().unwrap()).unwrap();
+        std::fs::write(&user_p2c, b"").unwrap();
+        assert_eq!(find_model(Some(&user), &bundled), Some(user_p2c.clone()));
+        let legacy_p2c = user.join("model-p2c/model.qjm");
+        std::fs::create_dir_all(legacy_p2c.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_p2c, b"").unwrap();
+        assert_eq!(find_model(Some(&user), &bundled), Some(user_p2c.clone()));
+        std::fs::remove_file(&user_p2c).unwrap();
+        assert_eq!(find_model(Some(&user), &bundled), Some(legacy_p2c));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
