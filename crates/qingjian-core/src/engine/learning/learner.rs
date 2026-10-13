@@ -12,15 +12,30 @@ pub trait Learner: Send {
     /// 该词被用户选择过的次数，没记录返回 0。
     fn weight(&self, text: &str) -> u32;
 
-    /// 用户在输入串 `input`（候选覆盖的那段拼音，不含分隔符）下选了 `text`。
-    /// 词级排序里同一输入串下选过的词排最前（`mgs` 选过 美国式，下次 `mgs` 它就是首选），与不分输入的 [`Self::weight`] 分开记：
-    /// `ba` 下选的是 吧，`bazhege` 下选的是 把，混在一起数就分不清。
-    fn record_choice(&mut self, _input: &str, _text: &str) {}
+    /// 用户在输入串 `input`（候选覆盖的那段拼音，不含分隔符）下选了 `text`，候选的读音键是 `reading`
+    /// （音节无分隔符连起来；形码 / 英文候选没有读音是空串）。字面键与读音键各记一份：
+    /// 词级排序里同一输入串下选过的词排最前（`mgs` 选过 美国式，下次 `mgs` 它就是首选），
+    /// 读音键让换个打法也认账（`wod` 选的 我的，`wode` 再打同样命中），查询取两键最大。
+    /// 与不分输入的 [`Self::weight`] 分开记：`ba` 下选的是 吧，`bazhege` 下选的是 把，混在一起数就分不清。
+    fn record_choice(&mut self, _input: &str, _reading: &str, _text: &str) {}
 
-    /// `text` 在输入串 `input` 下被选过的次数，没记录返回 0。
-    fn choice_weight(&self, _input: &str, _text: &str) -> u32 {
+    /// `text` 在输入串 `input` 下被选过的次数，含读音键下的记录，取两键最大；没记录返回 0。
+    fn choice_weight(&self, _input: &str, _reading: &str, _text: &str) -> u32 {
         0
     }
+
+    /// 整句上屏按整段记一条「这段拼音 → 这句话」（整句回灌的计数来源，见 `commit::finish_sentence`）。
+    /// 与 [`Self::record_choice`] 分开记：整段的选择不该参与词级排序的同串优先，
+    /// 也不该在英文词位置判定里算「用户选了中文」——一次整句接受就把英文词压到第二位太重了。
+    fn record_sentence_choice(&mut self, _input: &str, _reading: &str, _text: &str) {}
+
+    /// 同一段拼音下这句话被整段提交过几次（整句回灌的阈值）。
+    fn sentence_choice_weight(&self, _input: &str, _reading: &str, _text: &str) -> u32 {
+        0
+    }
+
+    /// 撤销一次 [`Self::record_sentence_choice`]（退格删掉重选时）。
+    fn unrecord_sentence_choice(&mut self, _input: &str, _reading: &str, _text: &str) {}
 
     /// 用户对输入串 `input` 按了回车原样上屏，而当时拼写纠错正生效：这个串就是要原样打的，以后不纠。
     fn record_raw(&mut self, _input: &str) {}
@@ -33,14 +48,20 @@ pub trait Learner: Send {
     /// 撤销一次 [`Self::record`]：用户上屏后马上整个删掉重选了别的词，刚才那次不算数。
     fn unrecord(&mut self, _text: &str) {}
 
-    /// 撤销一次 [`Self::record_choice`]。
-    fn unrecord_choice(&mut self, _input: &str, _text: &str) {}
+    /// 撤销一次 [`Self::record_choice`]（字面键与读音键一起退）。
+    fn unrecord_choice(&mut self, _input: &str, _reading: &str, _text: &str) {}
 
     /// 撤销 `times` 份 [`Self::record_transition`]。
     fn unrecord_transition(&mut self, _context: Context<'_>, _word: &str, _times: u32) {}
 
     /// 记一个词库里没有的词（来自云联想或以后的自动造词），带全拼音节；下次直接从本地出。
     fn learn_word(&mut self, _text: &str, _syllables: &[String]) {}
+
+    /// `text` 是不是用户词（整句多次提交回灌的、云联想学来的、自动造的都在内）：
+    /// 删候选时要不要给 Learner 递「删词」。缺省不是。
+    fn is_user_word(&self, _text: &str) -> bool {
+        false
+    }
 
     /// 用户词组成的小词库，与主词库一起查；没有就返回 `None`。
     fn user_words(&self) -> Option<&Dictionary> {
@@ -96,6 +117,9 @@ pub trait Learner: Send {
     ///
     /// 失败只记日志不返回错误：输入优先于学习，持久化失败不该影响壳的流程。
     fn flush(&mut self) {}
+
+    /// 选择次数衰减的半衰期（天），0 为不衰减。缺省不动；回放调参（`--tune decay-days=`）才换。
+    fn set_decay_half_life(&mut self, _days: f64) {}
 }
 
 /// 不学习。

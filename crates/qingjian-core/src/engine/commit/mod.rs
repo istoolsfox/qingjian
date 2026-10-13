@@ -6,8 +6,9 @@ use super::input_log::{InputLogEntry, InputLogger, InputSource};
 use super::learning::Learner;
 use super::query::EnglishTail;
 use super::{
-    AUTO_WORD_MAX_CHARS, AUTO_WORD_THRESHOLD, AUTO_WORD_THRESHOLD_SAME_BUFFER,
-    EXPLICIT_TRANSITION_WEIGHT, Engine, choice_key, segment_longest_prefix,
+    AUTO_WORD_MAX_CHARS, AUTO_WORD_SENTENCE_MAX_CHARS, AUTO_WORD_SENTENCE_THRESHOLD,
+    AUTO_WORD_THRESHOLD, AUTO_WORD_THRESHOLD_SAME_BUFFER, EXPLICIT_TRANSITION_WEIGHT, Engine,
+    choice_key, reading_key, segment_longest_prefix,
 };
 use crate::candidate::{Candidate, CandidateKind, CandidateList, Language};
 use crate::correction::typo;
@@ -20,6 +21,7 @@ mod last;
 mod transition;
 
 pub(super) use chain::CommitChain;
+pub(super) use last::Choice;
 pub use last::LastCommit;
 pub use transition::Transition;
 
@@ -118,11 +120,15 @@ impl Engine {
             self.chain.begin_buffer(key);
         }
         let mut typos = Vec::new();
+        // 候选的读音键：按输入串记选择时与字面键各记一份（[`Learner::record_choice`]）。
+        // 形码 / 英文 / emoji 候选没有音节，自然得到空串。
+        let reading = reading_key(candidate.syllables.iter().map(String::as_str));
         let (consumed, input) = match candidate.kind {
             CandidateKind::Chinese => {
                 self.learner.record(candidate);
                 let (consumed, input) = self.consumed_by(candidate);
-                self.learner.record_choice(&input, &candidate.text);
+                self.learner
+                    .record_choice(&input, &reading, &candidate.text);
                 typos = self.accepted_typos(candidate);
                 (consumed, input)
             }
@@ -130,14 +136,20 @@ impl Engine {
             CandidateKind::Code => {
                 self.learner.record(candidate);
                 let (consumed, input) = self.whole_scope();
-                self.learner.record_choice(&input, &candidate.text);
+                self.learner
+                    .record_choice(&input, &reading, &candidate.text);
                 (consumed, input)
             }
             // 英文词带出的 emoji、颜文字、符号没有音节，和英文词一样对应整段作用域
             kind if kind.follows_word() && candidate.syllables.is_empty() => self.whole_scope(),
             CandidateKind::Sentence => {
                 typos = self.accepted_typos(candidate);
-                self.consumed_by(candidate)
+                let (consumed, input) = self.consumed_by(candidate);
+                // 整句不记词频，但「这段拼音就是要这句话」要记：整句回灌成用户词的计数来源（见 [`Self::finish_sentence`]）。
+                // 记在独立的整句信号里，不进 choices——一次整句接受不该算「用户选了中文」去压英文词的位置
+                self.learner
+                    .record_sentence_choice(&input, &reading, &candidate.text);
+                (consumed, input)
             }
             // emoji、颜文字、符号按它对应词的音节消耗拼音，不记学习
             CandidateKind::Emoji | CandidateKind::Kaomoji | CandidateKind::Symbol => {
@@ -156,7 +168,8 @@ impl Engine {
                 }
                 self.learner.record(candidate);
                 let (consumed, input) = self.whole_scope();
-                self.learner.record_choice(&input, &candidate.text);
+                self.learner
+                    .record_choice(&input, &reading, &candidate.text);
                 (consumed, input)
             }
             // 模型直接生成的整句没有音节对齐（`yongdockerbushuhenfangbian` 的 `docker` 不是拼音），
@@ -252,6 +265,10 @@ impl Engine {
                             buffer_left || index < last,
                         );
                     }
+                    // 整段打完了才回灌：还有剩余拼音说明这句话只是拼出来的一段
+                    if !buffer_left {
+                        self.finish_sentence(&input, &reading, candidate);
+                    }
                 }
                 None => self.chain.reset(),
             },
@@ -299,6 +316,17 @@ impl Engine {
                     CandidateKind::Chinese | CandidateKind::Code | CandidateKind::Cloud
                 )
                 .then(|| candidate.text.clone()),
+                choice: matches!(
+                    candidate.kind,
+                    CandidateKind::Chinese
+                        | CandidateKind::Code
+                        | CandidateKind::Cloud
+                        | CandidateKind::Sentence
+                )
+                .then(|| Choice {
+                    reading: reading.clone(),
+                    text: candidate.text.clone(),
+                }),
                 transitions: std::mem::take(&mut self.recording),
                 typos,
                 erased: 0,
@@ -318,7 +346,7 @@ impl Engine {
     /// 一段拼音分几次选完了（`jidiaole` 先选 挤、剩下的走整句 掉了）：这几个词合起来就是用户对这段拼音的答案。
     /// 记一次「整段拼音 → 合成词」的选择；选到 [`AUTO_WORD_THRESHOLD_SAME_BUFFER`] 次、词库里没有、
     /// 不超过 [`AUTO_WORD_MAX_CHARS`] 字就造成用户词，下次整段打出来它直接排第一。返回记下的选择，撤销时退回。
-    pub(super) fn finish_buffer(&mut self) -> Option<(String, String)> {
+    pub(super) fn finish_buffer(&mut self) -> Option<(String, Choice)> {
         let words = self.chain.buffer_words();
         if words.len() < 2 {
             return None;
@@ -330,7 +358,6 @@ impl Engine {
         if key.is_empty() || chars > AUTO_WORD_MAX_CHARS || chars != syllables.len() {
             return None;
         }
-        self.learner.record_choice(&key, &text);
         let candidate = Candidate {
             text,
             kind: CandidateKind::Chinese,
@@ -339,14 +366,52 @@ impl Engine {
             translation: None,
             aux_code: None,
         };
+        let reading = reading_key(candidate.syllables.iter().map(String::as_str));
+        self.learner.record_choice(&key, &reading, &candidate.text);
         if !self.knows_word(&candidate)
-            && self.learner.choice_weight(&key, &candidate.text) >= AUTO_WORD_THRESHOLD_SAME_BUFFER
+            && self.learner.choice_weight(&key, &reading, &candidate.text)
+                >= AUTO_WORD_THRESHOLD_SAME_BUFFER
         {
             tracing::debug!(text = %candidate.text, "整段拼音分次选完，自动造词");
             self.learner
                 .learn_word(&candidate.text, &candidate.syllables);
         }
-        Some((key, candidate.text))
+        Some((
+            key,
+            Choice {
+                reading,
+                text: candidate.text,
+            },
+        ))
+    }
+
+    /// 整句回灌：同一段拼音提交过够多次（[`AUTO_WORD_SENTENCE_THRESHOLD`]）的同一句话，存成用户词。
+    /// 音节来自词图对齐（[`Self::sentence_words`] 校验过与文本逐字对应），不用信模型的读音。
+    /// 下次整段打出来，词图直接命中这个整句节点、按选择次数排第一——不再靠 n-gram 概率翻盘，
+    /// 这是「整句入词库」对青简原有学习链路的补强。上限 [`AUTO_WORD_SENTENCE_MAX_CHARS`] 字
+    /// 与 [`MAX_WORD_SYLLABLES`] 音节：更长的进不了整句词图的格子，存了也命中不了。
+    pub(super) fn finish_sentence(&mut self, input: &str, reading: &str, candidate: &Candidate) {
+        let chars = candidate.text.chars().count();
+        if input.is_empty()
+            || chars > AUTO_WORD_SENTENCE_MAX_CHARS
+            || candidate.syllables.len() > sentence::MAX_WORD_SYLLABLES
+            || chars != candidate.syllables.len()
+        {
+            return;
+        }
+        if self
+            .learner
+            .sentence_choice_weight(input, reading, &candidate.text)
+            < AUTO_WORD_SENTENCE_THRESHOLD
+        {
+            return;
+        }
+        if self.knows_word(candidate) {
+            return;
+        }
+        tracing::debug!(text = %candidate.text, "整句多次提交，回灌成用户词");
+        self.learner
+            .learn_word(&candidate.text, &candidate.syllables);
     }
 
     /// 最近删掉的上屏里有一次是同一段拼音（或它的前缀）、这次却选了别的词：把那次记的学习退回去。
@@ -386,7 +451,14 @@ impl Engine {
         });
         if let Some(chosen) = &last.chosen {
             self.learner.unrecord(chosen);
-            self.learner.unrecord_choice(&last.input, chosen);
+        }
+        if let Some(choice) = &last.choice {
+            // 词类的选择在 choices（读音键一起退），整句的在独立的整句信号里；
+            // 两边各只记一头，另一边自然扑空
+            self.learner
+                .unrecord_choice(&last.input, &choice.reading, &choice.text);
+            self.learner
+                .unrecord_sentence_choice(&last.input, &choice.reading, &choice.text);
         }
         for transition in &last.transitions {
             self.learner.unrecord_transition(
@@ -398,8 +470,9 @@ impl Engine {
         for (typed, intended) in &last.typos {
             self.learner.unrecord_typo(typed, intended);
         }
-        if let Some((key, phrase)) = &last.phrase {
-            self.learner.unrecord_choice(key, phrase);
+        if let Some((key, choice)) = &last.phrase {
+            self.learner
+                .unrecord_choice(key, &choice.reading, &choice.text);
         }
     }
 

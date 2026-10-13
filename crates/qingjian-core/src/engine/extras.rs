@@ -2,7 +2,7 @@
 
 use super::{
     EMOJI_PER_WORD, EMOJI_SCAN, ENGLISH_COMPLETIONS, Engine, KAOMOJI_PER_WORD, Learner,
-    MIN_COMPLETION_LETTERS,
+    MIN_COMPLETION_LETTERS, reading_key,
 };
 use crate::candidate::{Candidate, CandidateKind};
 use crate::emoji::EmojiTable;
@@ -108,7 +108,10 @@ impl Engine {
         let chosen = items
             .first()
             .filter(|c| c.kind == CandidateKind::Chinese)
-            .map_or(0, |c| self.learner.choice_weight(text, &c.text));
+            .map_or(0, |c| {
+                let reading = reading_key(c.syllables.iter().map(String::as_str));
+                self.learner.choice_weight(text, &reading, &c.text)
+            });
         let english_weight = word.map_or(0, |w| self.learner.weight(w));
         // 两字母全大写缩写（mp → MP、bm → BM）让中文先：整段太短，几乎总是在打中文。
         // 但**不压过学习记录**：`ok` / `pc` / `ll` 同样满足「两个字母的全大写缩写」，一刀切会把它们一起

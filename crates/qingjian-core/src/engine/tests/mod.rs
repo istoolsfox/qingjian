@@ -67,11 +67,11 @@ impl Learner for CountingLearner {
         self.0.get(text).copied().unwrap_or(0)
     }
 
-    fn record_choice(&mut self, input: &str, text: &str) {
+    fn record_choice(&mut self, input: &str, _reading: &str, text: &str) {
         *self.0.entry(format!("{input}\t{text}")).or_default() += 1;
     }
 
-    fn choice_weight(&self, input: &str, text: &str) -> u32 {
+    fn choice_weight(&self, input: &str, _reading: &str, text: &str) -> u32 {
         self.0
             .get(&format!("{input}\t{text}"))
             .copied()
@@ -108,7 +108,7 @@ impl Learner for CountingLearner {
         }
     }
 
-    fn unrecord_choice(&mut self, input: &str, text: &str) {
+    fn unrecord_choice(&mut self, input: &str, _reading: &str, text: &str) {
         if let Some(count) = self.0.get_mut(&format!("{input}\t{text}")) {
             *count = count.saturating_sub(1);
         }
@@ -297,18 +297,18 @@ struct WordLearner {
 impl Learner for WordLearner {
     fn record(&mut self, _candidate: &Candidate) {}
 
-    fn record_choice(&mut self, input: &str, text: &str) {
+    fn record_choice(&mut self, input: &str, _reading: &str, text: &str) {
         *self.choices.entry(format!("{input}\t{text}")).or_default() += 1;
     }
 
-    fn choice_weight(&self, input: &str, text: &str) -> u32 {
+    fn choice_weight(&self, input: &str, _reading: &str, text: &str) -> u32 {
         self.choices
             .get(&format!("{input}\t{text}"))
             .copied()
             .unwrap_or(0)
     }
 
-    fn unrecord_choice(&mut self, input: &str, text: &str) {
+    fn unrecord_choice(&mut self, input: &str, _reading: &str, text: &str) {
         if let Some(count) = self.choices.get_mut(&format!("{input}\t{text}")) {
             *count = count.saturating_sub(1);
         }
@@ -318,15 +318,44 @@ impl Learner for WordLearner {
         u32::from(self.words.iter().any(|(t, _)| t == text))
     }
 
+    fn record_sentence_choice(&mut self, input: &str, reading: &str, text: &str) {
+        *self
+            .choices
+            .entry(format!("{input}\t{reading}\t{text}"))
+            .or_default() += 1;
+    }
+
+    fn sentence_choice_weight(&self, input: &str, reading: &str, text: &str) -> u32 {
+        self.choices
+            .get(&format!("{input}\t{reading}\t{text}"))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn unrecord_sentence_choice(&mut self, input: &str, reading: &str, text: &str) {
+        if let Some(count) = self.choices.get_mut(&format!("{input}\t{reading}\t{text}")) {
+            *count = count.saturating_sub(1);
+        }
+    }
+
     fn learn_word(&mut self, text: &str, syllables: &[String]) {
         self.words.push((text.to_owned(), syllables.to_vec()));
-        let tsv: String = self
-            .words
-            .iter()
-            .map(|(t, s)| format!("{t}\t{}\t100\n", s.join(" ")))
-            .collect();
-        self.dictionary = Some(Dictionary::parse(&tsv).unwrap());
+        self.rebuild_dictionary();
         self.shared.lock().unwrap().0.push(text.to_owned());
+    }
+
+    fn is_user_word(&self, text: &str) -> bool {
+        self.words.iter().any(|(t, _)| t == text)
+    }
+
+    fn forget(&mut self, text: &str) -> Forgotten {
+        let mut forgotten = Forgotten::default();
+        if let Some(index) = self.words.iter().position(|(t, _)| t == text) {
+            self.words.remove(index);
+            self.rebuild_dictionary();
+            forgotten.user_word = true;
+        }
+        forgotten
     }
 
     fn user_words(&self) -> Option<&Dictionary> {
@@ -349,6 +378,22 @@ impl Learner for WordLearner {
 
     fn user_ngram(&self) -> Option<&sentence::UserNgram> {
         Some(&self.ngram)
+    }
+}
+
+impl WordLearner {
+    /// 词表变了就整个重建小词库，与 FrequencyLearner 同款。
+    fn rebuild_dictionary(&mut self) {
+        if self.words.is_empty() {
+            self.dictionary = None;
+            return;
+        }
+        let tsv: String = self
+            .words
+            .iter()
+            .map(|(t, s)| format!("{t}\t{}\t100\n", s.join(" ")))
+            .collect();
+        self.dictionary = Some(Dictionary::parse(&tsv).unwrap());
     }
 }
 

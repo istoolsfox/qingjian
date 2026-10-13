@@ -2,59 +2,120 @@
 
 use super::*;
 
+/// 选择的计数表里记一份；同一 (键, 词) 已有条目就累加。
+fn bump_choice(choices: &mut HashMap<String, HashMap<String, u32>>, key: &str, text: &str) {
+    *choices
+        .entry(key.to_owned())
+        .or_default()
+        .entry(text.to_owned())
+        .or_default() += 1;
+}
+
+/// 从选择的计数表里退回一份，空了连键一起删。
+fn remove_choice(choices: &mut HashMap<String, HashMap<String, u32>>, key: &str, text: &str) {
+    let Some(texts) = choices.get_mut(key) else {
+        return;
+    };
+    if let Some(count) = texts.get_mut(text) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            texts.remove(text);
+        }
+    }
+    if texts.is_empty() {
+        choices.remove(key);
+    }
+}
+
+/// 键下的选择次数。
+fn lookup_choice(choices: &HashMap<String, HashMap<String, u32>>, key: &str, text: &str) -> u32 {
+    choices
+        .get(key)
+        .and_then(|texts| texts.get(text))
+        .copied()
+        .unwrap_or(0)
+}
+
 impl Learner for FrequencyLearner {
     fn record(&mut self, candidate: &Candidate) {
-        *self.counts.entry(candidate.text.clone()).or_default() += 1;
+        self.tick();
+        let now = self.today.get();
+        self.counts
+            .entry(candidate.text.clone())
+            .or_insert_with(|| Decay::from_parts(0, now))
+            .record(1, now);
         self.dirty = true;
         tracing::debug!(text = %candidate.text, "记录用户选择");
     }
 
     fn weight(&self, text: &str) -> u32 {
-        self.counts.get(text).copied().unwrap_or(0)
+        self.counts
+            .get(text)
+            .map_or(0, |entry| self.effective(entry))
     }
 
-    fn record_choice(&mut self, input: &str, text: &str) {
+    fn record_choice(&mut self, input: &str, reading: &str, text: &str) {
         if input.is_empty() || text.is_empty() {
             return;
         }
-        *self
-            .choices
-            .entry(input.to_owned())
-            .or_default()
-            .entry(text.to_owned())
-            .or_default() += 1;
+        self.tick();
+        bump_choice(&mut self.choices, input, text);
+        // 同一个词换个打法也认账：`wod` 选的 我的，`wode` 再打时按读音键同样命中。
+        // 候选盖满整段时读音与字面相同，只记一份。
+        if !reading.is_empty() && reading != input {
+            bump_choice(&mut self.choices, reading, text);
+        }
         self.choices_dirty = true;
         if self.choice_count() > MAX_CHOICE_ENTRIES {
             self.decay_choices();
         }
-        tracing::debug!(input, text, "记录输入串下的选择");
+        tracing::debug!(input, reading = %reading, text, "记录输入串下的选择");
     }
 
-    fn choice_weight(&self, input: &str, text: &str) -> u32 {
-        self.choices
-            .get(input)
+    fn choice_weight(&self, input: &str, reading: &str, text: &str) -> u32 {
+        let literal = lookup_choice(&self.choices, input, text);
+        // 读音键只在「当前输入是候选读音的前缀」（换打法把音节补全，`wod` → `wode`）时参与：
+        // 简拼（`sm` 对 `shangmian`）不是读音的前缀，全拼下的选择不带过来；单字母简拼候选太多，同样不带。
+        if reading.is_empty() || input.len() < 2 || !reading.starts_with(input) {
+            return literal;
+        }
+        literal.max(lookup_choice(&self.choices, reading, text))
+    }
+
+    fn record_raw(&mut self, input: &str) {
+        self.record_choice(input, "", RAW_MARK);
+    }
+
+    fn record_sentence_choice(&mut self, input: &str, reading: &str, text: &str) {
+        if input.is_empty() || text.is_empty() {
+            return;
+        }
+        *self
+            .sentences
+            .entry((input.to_owned(), reading.to_owned()))
+            .or_default()
+            .entry(text.to_owned())
+            .or_default() += 1;
+        self.sentences_dirty = true;
+        if self.sentence_count() > MAX_SENTENCE_ENTRIES {
+            self.decay_sentences();
+        }
+        tracing::debug!(input, reading = %reading, text, "记录整句的整段选择");
+    }
+
+    fn sentence_choice_weight(&self, input: &str, reading: &str, text: &str) -> u32 {
+        self.sentences
+            .get(&(input.to_owned(), reading.to_owned()))
             .and_then(|texts| texts.get(text))
             .copied()
             .unwrap_or(0)
     }
 
-    fn record_raw(&mut self, input: &str) {
-        self.record_choice(input, RAW_MARK);
-    }
-
-    fn unrecord(&mut self, text: &str) {
-        if let Some(count) = self.counts.get_mut(text) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                self.counts.remove(text);
-            }
-            self.dirty = true;
-            tracing::debug!(text, "撤销用户选择");
-        }
-    }
-
-    fn unrecord_choice(&mut self, input: &str, text: &str) {
-        let Some(texts) = self.choices.get_mut(input) else {
+    fn unrecord_sentence_choice(&mut self, input: &str, reading: &str, text: &str) {
+        let Some(texts) = self
+            .sentences
+            .get_mut(&(input.to_owned(), reading.to_owned()))
+        else {
             return;
         };
         if let Some(count) = texts.get_mut(text) {
@@ -62,10 +123,29 @@ impl Learner for FrequencyLearner {
             if *count == 0 {
                 texts.remove(text);
             }
-            self.choices_dirty = true;
         }
         if texts.is_empty() {
-            self.choices.remove(input);
+            self.sentences
+                .remove(&(input.to_owned(), reading.to_owned()));
+        }
+    }
+
+    fn unrecord(&mut self, text: &str) {
+        self.tick();
+        if let Some(entry) = self.counts.get_mut(text) {
+            entry.unrecord(1);
+            if entry.count == 0 {
+                self.counts.remove(text);
+            }
+            self.dirty = true;
+            tracing::debug!(text, "撤销用户选择");
+        }
+    }
+
+    fn unrecord_choice(&mut self, input: &str, reading: &str, text: &str) {
+        remove_choice(&mut self.choices, input, text);
+        if !reading.is_empty() && reading != input {
+            remove_choice(&mut self.choices, reading, text);
         }
     }
 
@@ -75,7 +155,7 @@ impl Learner for FrequencyLearner {
     }
 
     fn raw_count(&self, input: &str) -> u32 {
-        self.choice_weight(input, RAW_MARK)
+        self.choice_weight(input, "", RAW_MARK)
     }
 
     fn learn_word(&mut self, text: &str, syllables: &[String]) {
@@ -91,6 +171,10 @@ impl Learner for FrequencyLearner {
         tracing::debug!(text, ?syllables, "记录用户词");
     }
 
+    fn is_user_word(&self, text: &str) -> bool {
+        self.words.contains_key(text)
+    }
+
     fn user_words(&self) -> Option<&Dictionary> {
         self.user_dictionary.as_ref()
     }
@@ -99,12 +183,14 @@ impl Learner for FrequencyLearner {
         if word.is_empty() {
             return;
         }
+        self.tick();
+        let now = self.today.get();
         let entry = self
             .english
             .entry(word.to_ascii_lowercase())
-            .or_insert_with(|| (word.to_owned(), 0));
-        entry.1 += 1;
-        let count = entry.1;
+            .or_insert_with(|| (word.to_owned(), Decay::from_parts(0, now)));
+        entry.1.record(1, now);
+        let count = entry.1.count;
         self.english_dirty = true;
         self.rebuild_english();
         tracing::debug!(word, count, "记录个人英文词");
@@ -131,12 +217,14 @@ impl Learner for FrequencyLearner {
         if typed.is_empty() || intended.is_empty() {
             return;
         }
-        *self
-            .typos
+        self.tick();
+        let now = self.today.get();
+        self.typos
             .entry(typed.to_owned())
             .or_default()
             .entry(intended.to_owned())
-            .or_default() += 1;
+            .or_insert_with(|| Decay::from_parts(0, now))
+            .record(1, now);
         self.typos_dirty = true;
         tracing::debug!(typed, intended, "记录敲错");
     }
@@ -145,9 +233,9 @@ impl Learner for FrequencyLearner {
         let Some(intended_counts) = self.typos.get_mut(typed) else {
             return;
         };
-        if let Some(count) = intended_counts.get_mut(intended) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
+        if let Some(entry) = intended_counts.get_mut(intended) {
+            entry.unrecord(1);
+            if entry.count == 0 {
                 intended_counts.remove(intended);
             }
             self.typos_dirty = true;
@@ -161,8 +249,11 @@ impl Learner for FrequencyLearner {
         self.typos
             .get(typed)
             .and_then(|intended_counts| intended_counts.get(intended))
-            .copied()
-            .unwrap_or(0)
+            .map_or(0, |entry| self.effective(entry))
+    }
+
+    fn set_decay_half_life(&mut self, days: f64) {
+        self.set_half_life_days(days);
     }
 
     fn forget(&mut self, text: &str) -> Forgotten {
@@ -189,6 +280,19 @@ impl Learner for FrequencyLearner {
         for input in emptied {
             self.choices.remove(&input);
         }
+        let mut emptied = Vec::new();
+        for (key, texts) in &mut self.sentences {
+            if texts.remove(text).is_some() {
+                forgotten.learning = true;
+                self.sentences_dirty = true;
+                if texts.is_empty() {
+                    emptied.push(key.clone());
+                }
+            }
+        }
+        for key in emptied {
+            self.sentences.remove(&key);
+        }
         if self.ngram.forget_word(text) > 0 {
             forgotten.learning = true;
             self.ngram_dirty = true;
@@ -210,7 +314,9 @@ impl Learner for FrequencyLearner {
         let Some(path) = self.path.clone() else {
             return;
         };
-        if self.dirty {
+        self.tick();
+        // 没有新记录也可能有过期条目：到期的表重写一次把它们清出（save 内部会 retain）
+        if self.dirty || self.counts.values().any(|entry| self.effective(entry) == 0) {
             match self.save_to(&path) {
                 Ok(()) => {
                     tracing::info!(path = %path.display(), entries = self.counts.len(), "用户词频已保存")
@@ -229,7 +335,12 @@ impl Learner for FrequencyLearner {
                 }
             }
         }
-        if self.english_dirty {
+        if self.english_dirty
+            || self
+                .english
+                .values()
+                .any(|(_, entry)| self.effective(entry) == 0)
+        {
             let english_path = Self::english_path(&path);
             match self.save_english_to(&english_path) {
                 Ok(()) => {
@@ -262,7 +373,23 @@ impl Learner for FrequencyLearner {
                 }
             }
         }
-        if self.typos_dirty {
+        if self.sentences_dirty {
+            let sentences_path = Self::sentences_path(&path);
+            match self.save_sentences_to(&sentences_path) {
+                Ok(()) => {
+                    tracing::info!(path = %sentences_path.display(), entries = self.sentence_count(), "整句选择已保存")
+                }
+                Err(error) => {
+                    tracing::warn!(path = %sentences_path.display(), %error, "整句选择保存失败")
+                }
+            }
+        }
+        if self.typos_dirty
+            || self
+                .typos
+                .values()
+                .any(|intended| intended.values().any(|entry| self.effective(entry) == 0))
+        {
             let typos_path = Self::typos_path(&path);
             match self.save_typos_to(&typos_path) {
                 Ok(()) => {

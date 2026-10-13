@@ -8,36 +8,56 @@ impl FrequencyLearner {
         frequency_path.with_file_name(USER_ENGLISH_FILE)
     }
 
-    /// 从 `词\t次数` 读个人英文词，返回跳过的坏行数。
-    pub(super) fn load_english(&mut self, source: &str) -> usize {
+    /// 从 `词\t次数[\t天数]` 读个人英文词，返回跳过的坏行数。
+    /// 旧格式没有天数列，整份按 `fallback_day`（文件的修改日）计。
+    pub(super) fn load_english(&mut self, source: &str, fallback_day: u64) -> usize {
         let mut skipped = 0;
         for line in data_lines(source) {
-            let Some((word, count)) = line
-                .split_once('\t')
-                .and_then(|(word, count)| Some((word, count.trim().parse::<u32>().ok()?)))
-            else {
-                skipped += 1;
-                continue;
+            let mut fields = line.split('\t');
+            let parsed = match (fields.next(), fields.next(), fields.next()) {
+                (Some(word), Some(count), day) => {
+                    let day = day.map_or(fallback_day, |day| {
+                        day.trim().parse::<u64>().unwrap_or(fallback_day)
+                    });
+                    count
+                        .trim()
+                        .parse::<u32>()
+                        .ok()
+                        .map(|count| (word, count, day))
+                }
+                _ => None,
             };
-            if count > 0 {
-                self.english
-                    .insert(word.to_ascii_lowercase(), (word.to_owned(), count));
+            match parsed {
+                Some((word, count, day)) => {
+                    if count > 0 {
+                        self.english.insert(
+                            word.to_ascii_lowercase(),
+                            (word.to_owned(), Decay::from_parts(count, day)),
+                        );
+                    }
+                }
+                None => skipped += 1,
             }
         }
         self.rebuild_english();
         skipped
     }
 
-    /// 个人英文词很少，每次变化整个重建词表即可。次数当词频，补全时常用的在前。
+    /// 个人英文词很少，每次变化整个重建词表即可。有效次数当词频，补全时常用的在前；
+    /// 冷却到 0 的条目不再进词表（落盘时会清出）。
     pub(super) fn rebuild_english(&mut self) {
-        if self.english.is_empty() {
+        let kept: Vec<(&String, &(String, Decay))> = self
+            .english
+            .iter()
+            .filter(|(_, (_, entry))| self.effective(entry) > 0)
+            .collect();
+        if kept.is_empty() {
             self.english_list = None;
             return;
         }
-        let tsv: String = self
-            .english
+        let tsv: String = kept
             .iter()
-            .map(|(code, (word, count))| format!("{word}\t{code}\t{count}\n"))
+            .map(|(code, (word, entry))| format!("{word}\t{code}\t{}\n", self.effective(entry)))
             .collect();
         match WordList::parse(&tsv) {
             Ok(list) => self.english_list = Some(list),
@@ -51,15 +71,27 @@ impl FrequencyLearner {
     }
 
     pub(super) fn save_english_to(&mut self, path: &Path) -> Result<(), LearningError> {
-        let mut rows: Vec<&(String, u32)> = self.english.values().collect();
-        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let now = self.today.get();
+        let half_life = self.half_life_days;
+        // 冷却到 0 的条目文件与内存一起清出
+        self.english
+            .retain(|_, (_, entry)| entry.effective(now, half_life) > 0);
+        let mut rows: Vec<(&String, &(String, Decay))> = self.english.iter().collect();
+        rows.sort_by(|a, b| {
+            b.1.1
+                .effective(now, half_life)
+                .cmp(&a.1.1.effective(now, half_life))
+                .then_with(|| a.1.0.cmp(&b.1.0))
+        });
         write_atomic(path, |file| {
-            writeln!(file, "# 青简个人英文词：词\\t次数")?;
-            for (word, count) in rows {
-                writeln!(file, "{word}\t{count}")?;
+            writeln!(file, "# 青简个人英文词：词\\t次数\\t最近使用日（unix 天）")?;
+            for (_, (word, entry)) in rows {
+                writeln!(file, "{word}\t{}\t{}", entry.count, entry.last_used)?;
             }
             Ok(())
         })?;
+        // 清出后词表同步重建，冷却到 0 的词不再出候选
+        self.rebuild_english();
         self.english_dirty = false;
         Ok(())
     }
@@ -114,43 +146,150 @@ impl FrequencyLearner {
         frequency_path.with_file_name(USER_TYPOS_FILE)
     }
 
-    /// 从 `敲的\t要的\t次数` 读个人敲错表，返回跳过的坏行数。
-    pub(super) fn load_typos(&mut self, source: &str) -> usize {
+    /// 整句选择文件与词频文件同目录。
+    pub(super) fn sentences_path(frequency_path: &Path) -> PathBuf {
+        frequency_path.with_file_name(USER_SENTENCES_FILE)
+    }
+
+    /// 从 `输入串\t读音\t句子\t次数` 读整句选择，返回跳过的坏行数。
+    pub(super) fn load_sentences(&mut self, source: &str) -> usize {
         let mut skipped = 0;
         for line in data_lines(source) {
-            let Some((typed, intended, count)) = parse_counted_pair(line) else {
-                skipped += 1;
-                continue;
+            let mut fields = line.split('\t');
+            let parsed = match (fields.next(), fields.next(), fields.next(), fields.next()) {
+                (Some(input), Some(reading), Some(text), Some(count)) => count
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+                    .map(|count| (input, reading, text, count)),
+                _ => None,
             };
-            if count > 0 {
-                self.typos
-                    .entry(typed.to_owned())
-                    .or_default()
-                    .insert(intended.to_owned(), count);
+            match parsed {
+                Some((input, reading, text, count)) => {
+                    if count > 0 && !text.is_empty() {
+                        *self
+                            .sentences
+                            .entry((input.to_owned(), reading.to_owned()))
+                            .or_default()
+                            .entry(text.to_owned())
+                            .or_insert(0) += count;
+                    }
+                }
+                None => skipped += 1,
+            }
+        }
+        skipped
+    }
+
+    pub(super) fn save_sentences_to(&mut self, path: &Path) -> Result<(), LearningError> {
+        let mut rows: Vec<(&(String, String), &String, &u32)> = self
+            .sentences
+            .iter()
+            .flat_map(|(key, texts)| texts.iter().map(move |(text, count)| (key, text, count)))
+            .collect();
+        rows.sort_by(|a, b| {
+            (a.0)
+                .0
+                .cmp(&(b.0).0)
+                .then_with(|| (a.0).1.cmp(&(b.0).1))
+                .then_with(|| b.2.cmp(a.2))
+                .then_with(|| a.1.cmp(b.1))
+        });
+        write_atomic(path, |file| {
+            writeln!(file, "# 青简整句选择：输入串\t读音\t句子\t次数")?;
+            for (key, text, count) in rows {
+                writeln!(file, "{}\t{}\t{text}\t{count}", key.0, key.1)?;
+            }
+            Ok(())
+        })?;
+        self.sentences_dirty = false;
+        Ok(())
+    }
+
+    /// 整句选择条数。
+    pub fn sentence_count(&self) -> usize {
+        self.sentences.values().map(HashMap::len).sum()
+    }
+
+    /// 超上限时所有整句计数减半，去掉减到零的。
+    pub(super) fn decay_sentences(&mut self) {
+        for texts in self.sentences.values_mut() {
+            texts.retain(|_, count| {
+                *count /= 2;
+                *count > 0
+            });
+        }
+        self.sentences.retain(|_, texts| !texts.is_empty());
+    }
+
+    /// 从 `敲的\t要的\t次数[\t天数]` 读个人敲错表，返回跳过的坏行数。
+    /// 旧格式没有天数列，整份按 `fallback_day`（文件的修改日）计。
+    pub(super) fn load_typos(&mut self, source: &str, fallback_day: u64) -> usize {
+        let mut skipped = 0;
+        for line in data_lines(source) {
+            let mut fields = line.split('\t');
+            let parsed = match (fields.next(), fields.next(), fields.next(), fields.next()) {
+                (Some(typed), Some(intended), Some(count), day) => {
+                    let day = day.map_or(fallback_day, |day| {
+                        day.trim().parse::<u64>().unwrap_or(fallback_day)
+                    });
+                    count
+                        .trim()
+                        .parse::<u32>()
+                        .ok()
+                        .map(|count| (typed, intended, count, day))
+                }
+                _ => None,
+            };
+            match parsed {
+                Some((typed, intended, count, day)) => {
+                    if count > 0 {
+                        self.typos
+                            .entry(typed.to_owned())
+                            .or_default()
+                            .insert(intended.to_owned(), Decay::from_parts(count, day));
+                    }
+                }
+                None => skipped += 1,
             }
         }
         skipped
     }
 
     pub(super) fn save_typos_to(&mut self, path: &Path) -> Result<(), LearningError> {
-        let mut rows: Vec<(&String, &String, &u32)> = self
+        let now = self.today.get();
+        let half_life = self.half_life_days;
+        // 冷却到 0 的条目文件与内存一起清出
+        for intended in self.typos.values_mut() {
+            intended.retain(|_, entry| entry.effective(now, half_life) > 0);
+        }
+        self.typos.retain(|_, intended| !intended.is_empty());
+        let mut rows: Vec<(&String, &String, &Decay)> = self
             .typos
             .iter()
             .flat_map(|(typed, intended)| {
                 intended
                     .iter()
-                    .map(move |(syllable, count)| (typed, syllable, count))
+                    .map(move |(syllable, entry)| (typed, syllable, entry))
             })
             .collect();
         rows.sort_by(|a, b| {
-            a.0.cmp(b.0)
-                .then_with(|| b.2.cmp(a.2))
+            b.2.effective(now, half_life)
+                .cmp(&a.2.effective(now, half_life))
+                .then_with(|| a.0.cmp(b.0))
                 .then_with(|| a.1.cmp(b.1))
         });
         write_atomic(path, |file| {
-            writeln!(file, "# 青简个人敲错表：敲的\t要的\t次数")?;
-            for (typed, intended, count) in rows {
-                writeln!(file, "{typed}\t{intended}\t{count}")?;
+            writeln!(
+                file,
+                "# 青简个人敲错表：敲的\t要的\t次数\t最近使用日（unix 天）"
+            )?;
+            for (typed, intended, entry) in rows {
+                writeln!(
+                    file,
+                    "{typed}\t{intended}\t{}\t{}",
+                    entry.count, entry.last_used
+                )?;
             }
             Ok(())
         })?;

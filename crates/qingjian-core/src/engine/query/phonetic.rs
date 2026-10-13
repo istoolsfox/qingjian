@@ -150,9 +150,10 @@ impl Engine {
             let covered = correction
                 .as_ref()
                 .map_or(item.coverage, |c| c.edit.to_original(item.coverage));
-            let choice = letters
-                .get(..covered)
-                .map_or(0, |input| self.learner.choice_weight(input, hit.text));
+            let choice = letters.get(..covered).map_or(0, |input| {
+                self.learner
+                    .choice_weight(input, &reading_key(hit.syllables()), hit.text)
+            });
             let log_prob = sentence::transition_log_prob(
                 &*self.language_model,
                 self.personal(),

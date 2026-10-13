@@ -165,8 +165,15 @@ impl Engine {
                 user_word: self.learner.forget_english(&candidate.text),
                 learning: false,
             },
-            CandidateKind::Sentence
-            | CandidateKind::Shortcut
+            // 回灌成用户词的整句可以删；普通整句没记学习，没什么可删
+            CandidateKind::Sentence => {
+                if self.learner.is_user_word(&candidate.text) {
+                    self.learner.forget(&candidate.text)
+                } else {
+                    Forgotten::default()
+                }
+            }
+            CandidateKind::Shortcut
             | CandidateKind::Custom(_)
             | CandidateKind::Emoji
             | CandidateKind::Kaomoji

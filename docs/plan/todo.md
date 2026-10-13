@@ -65,7 +65,7 @@
 - [x] 中英混杂词与英文专名（2026-09-15）：`assets/lexicon/mixed_words.tsv`（C盘 / B站 / U盘 / T恤 / A股…，`cpan`→C盘，`youpan`→U盘，
   可进整句 `wozaibzhan`→我在B站）；`dict-convert english` 同编码优先大写专名（Windows ≠ windows），`07_display_forms.tsv` 补 VSCode / Bilibili 等；
   产品 `dict.tsv` / `english.tsv` 已更新。句中英文仍只支持句末尾段，见「中英混输」。
-- [ ] 按输入串记的选择只认字面：`wod` 下选的 我的 惠及不到 `wode`；考虑同时按候选全拼记一份、查询取两者最大
+- [x] 按输入串记的选择只认字面：2026-10-13 已按「候选全拼记一份、查询取两者最大」做了（`user-choices.tsv` 字面键 + 读音键各一份）
 - [ ] 已经学进用户词的错读音云端词（`我的 wo di`、`我的哦 wo di e` 这类）没有清理入口：偏好设置词库页给「按读音核对用户词」，或一次性脚本
 - [ ] 正式版前的发布可信性（2026-09-12 外部 CI 检查，测试版先不做）：产品数据改不可变 tag 并在仓库锁版本 + SHA（2026-09-16 已做：`data-vN` Release + `tools/release/data.lock` + `data-fetch.sh`）；
   安装包内容验证（pkg / Setup.exe 里词库、模型、许可齐不齐，`codesign --verify` / `signtool verify`）；`cargo deny`（许可证 + 来源）；`.qj` 读取器越界 fuzz、`qingjian-format` 跑 Miri
@@ -73,11 +73,9 @@
   重排改了切分时应用里的行内拼音要到下一键才更新；日语
 - [ ] 个人微调（LoRA 挂在冻结基模上，基模更新后拿本地日志重训）：先在 train 仓库验证收益，再验 candle CPU 训练能不能跑通，都过了才进壳
   （闲时门禁、加载时合并权重、开关与一键清除）；每个模型假设先按 `docs/plan/model-eval.md` 写尺子与基线
-- [ ] 个人英文词表没有衰减（2026-09-24 发现）：`learn_english` 只加不减，`insert_english` 里的 `choice_weight` 只决定
-  「要不要当第一」（`english_first`），位置只有 0 和 1 两档——用户选一百次中文候选，那条英文还是钉在词级候选第一位。
-  于是打不出来时原样上屏攒下的失败拼音（`houxuanshengcheng`、`shururizhi`）会永久占第一页一格，不危险但也不自愈。
-  合理的改法是让选择次数参与位置而不只是决定第一名，属于排序改动，先跑 `--replay` 冻结日志与整句评测再动。
-  现成出口：删候选快捷键（缺省 `Shift` + 数字）走的就是 `forget_english`。
+- [x] 个人英文词表没有衰减（2026-09-24 发现）：2026-10-13 用户词频 / 个人英文词 / 敲错表三张表加了牛顿冷却时间衰减
+  （半衰期 30 天，`--tune decay-days=` 可调，0 为不衰减），30 天不用的英文词失去「当第一」的资格并自动清出；
+  自愈出口仍是删候选快捷键（缺省 `Shift` + 数字）走 `forget_english`。
 - [ ] 日语 emoji 要等有日语输入模式
 
 ## 二、产品特色

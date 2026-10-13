@@ -1,8 +1,11 @@
+mod decay;
 mod learner_impl;
 mod tables;
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
+use decay::{DEFAULT_HALF_LIFE_DAYS, Decay};
 use foldhash::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -32,6 +35,13 @@ const USER_ENGLISH_FILE: &str = "user-english.tsv";
 /// 个人敲错表文件名，与词频文件同目录：`敲的\t要的\t次数`（音节级，接受过的纠正）。
 const USER_TYPOS_FILE: &str = "user-typos.tsv";
 
+/// 整段提交的整句选择文件名：`输入串\t读音\t句子\t次数`。整句回灌的计数（Core `finish_sentence`），
+/// 与按输入串记的选择分开存：整段的选择不参与词级排序与英文词位置判定。
+const USER_SENTENCES_FILE: &str = "user-sentences.tsv";
+
+/// 整句选择最多存多少条，超过就整体减半。
+const MAX_SENTENCE_ENTRIES: usize = 10_000;
+
 /// 按输入串记的选择最多存多少条 (输入串, 词)，超过就整体减半（忘掉久远的偏好）。
 const MAX_CHOICE_ENTRIES: usize = 50_000;
 
@@ -39,10 +49,21 @@ const MAX_CHOICE_ENTRIES: usize = 50_000;
 const RAW_MARK: &str = "<raw>";
 
 /// 内存中的用户词频表。
-#[derive(Debug, Default)]
+///
+/// 词频、个人英文词与个人敲错表三张表带时间衰减（[`Decay`]，牛顿冷却）：记录时刷新最近使用日，
+/// 查询时按半衰期折算有效次数，落盘时把冷却到 0 的条目清出。衰减只让陈旧偏好让位，
+/// 不改「一次误选翻不过静态证据」的封顶设计。
+#[derive(Debug)]
 pub struct FrequencyLearner {
-    /// 词 → 用户选择次数。
-    counts: HashMap<String, u32>,
+    /// 词 → 用户选择次数（带最近使用日）。
+    counts: HashMap<String, Decay>,
+
+    /// 衰减半衰期（天）；0 为不衰减。缺省 [`DEFAULT_HALF_LIFE_DAYS`]，回放调参可改。
+    half_life_days: f64,
+
+    /// 今天的 unix 天数。读路径（`weight` 等）是 `&self`，不能每次查时钟——写路径刷新它，读路径用缓存值，
+    /// 粒度是天，进程活得再久也只差一天。
+    today: Cell<u64>,
 
     /// 自上次保存后是否有新记录。
     dirty: bool,
@@ -65,14 +86,20 @@ pub struct FrequencyLearner {
     /// 个人 n-gram 自上次保存后是否有变化。
     ngram_dirty: bool,
 
-    /// 输入串 → (词 → 在这个输入串下被选的次数)。
+    /// 输入串 → (词 → 在这个输入串下被选的次数)。读音键与字面键混在同一张表（见 [`Learner::record_choice`]）。
     choices: HashMap<String, HashMap<String, u32>>,
 
     /// 按输入串记的选择自上次保存后是否有变化。
     choices_dirty: bool,
 
-    /// 个人英文词：小写编码 → (第一次敲的写法, 次数)。回车原样上屏的英文词、选过的英文候选。
-    english: BTreeMap<String, (String, u32)>,
+    /// (输入串, 读音) → (句子 → 整段提交次数)。整句回灌的计数，独立于 [`Self::choices`]。
+    sentences: HashMap<(String, String), HashMap<String, u32>>,
+
+    /// 整句选择自上次保存后是否有变化。
+    sentences_dirty: bool,
+
+    /// 个人英文词：小写编码 → (第一次敲的写法, 带衰减的次数)。回车原样上屏的英文词、选过的英文候选。
+    english: BTreeMap<String, (String, Decay)>,
 
     /// 个人英文词组成的词表，随 `english` 重建。
     english_list: Option<WordList>,
@@ -80,36 +107,93 @@ pub struct FrequencyLearner {
     /// 个人英文词自上次保存后是否有变化。
     english_dirty: bool,
 
-    /// 个人敲错表：敲的那段字母 → (要的音节 → 接受次数)。
-    typos: HashMap<String, HashMap<String, u32>>,
+    /// 个人敲错表：敲的那段字母 → (要的音节 → 带衰减的接受次数)。
+    typos: HashMap<String, HashMap<String, Decay>>,
 
     /// 个人敲错表自上次保存后是否有变化。
     typos_dirty: bool,
+}
+
+impl Default for FrequencyLearner {
+    fn default() -> Self {
+        Self {
+            counts: HashMap::default(),
+            half_life_days: DEFAULT_HALF_LIFE_DAYS,
+            today: Cell::new(decay::today()),
+            dirty: false,
+            path: None,
+            words: BTreeMap::default(),
+            user_dictionary: None,
+            words_dirty: false,
+            ngram: UserNgram::default(),
+            ngram_dirty: false,
+            choices: HashMap::default(),
+            choices_dirty: false,
+            sentences: HashMap::default(),
+            sentences_dirty: false,
+            english: BTreeMap::default(),
+            english_list: None,
+            english_dirty: false,
+            typos: HashMap::default(),
+            typos_dirty: false,
+        }
+    }
 }
 
 impl FrequencyLearner {
     /// 从 `词\t次数` 文本建表（只在内存里学习）。坏行跳过。
     pub fn parse(source: &str) -> Self {
         let mut learner = Self::default();
-        learner.load_counts(source);
+        learner.load_counts(source, decay::today());
         learner
     }
 
-    /// 从 `词\t次数` 读选择次数，返回跳过的坏行数。
-    fn load_counts(&mut self, source: &str) -> usize {
+    /// 从 `词\t次数[\t天数]` 读选择次数，返回跳过的坏行数。
+    /// 旧格式没有天数列，整份按 `fallback_day`（文件的修改日）计。
+    fn load_counts(&mut self, source: &str, fallback_day: u64) -> usize {
         let mut skipped = 0;
         for line in data_lines(source) {
-            match line
-                .split_once('\t')
-                .and_then(|(text, count)| Some((text, count.trim().parse::<u32>().ok()?)))
-            {
-                Some((text, count)) => {
-                    self.counts.insert(text.to_owned(), count);
+            let mut fields = line.split('\t');
+            let parsed = match (fields.next(), fields.next(), fields.next()) {
+                (Some(text), Some(count), day) => {
+                    let day = day.map_or(fallback_day, |day| {
+                        day.trim().parse::<u64>().unwrap_or(fallback_day)
+                    });
+                    count
+                        .trim()
+                        .parse::<u32>()
+                        .ok()
+                        .map(|count| (text, count, day))
+                }
+                _ => None,
+            };
+            match parsed {
+                Some((text, count, day)) => {
+                    if count > 0 {
+                        self.counts
+                            .insert(text.to_owned(), Decay::from_parts(count, day));
+                    }
                 }
                 None => skipped += 1,
             }
         }
         skipped
+    }
+
+    /// 刷新缓存的「今天」。写路径开头调；读路径（`weight` 等，一键要查几万次）用缓存值，不查时钟。
+    fn tick(&mut self) {
+        self.today.set(decay::today());
+    }
+
+    /// 一条带衰减计数的有效次数。
+    fn effective(&self, entry: &Decay) -> u32 {
+        entry.effective(self.today.get(), self.half_life_days)
+    }
+
+    /// 衰减半衰期（天）；0 为不衰减。回放调参用（`--tune decay-days=`）。
+    pub fn set_half_life_days(&mut self, days: f64) {
+        self.half_life_days = days;
+        self.tick();
     }
 
     /// 从文件加载，之后 [`Learner::flush`] 会写回同一个文件。
@@ -122,7 +206,7 @@ impl FrequencyLearner {
         let path = path.into();
         let mut learner = Self::default();
         if let Some(source) = read_text_lossy(&path)? {
-            let skipped = learner.load_counts(&source);
+            let skipped = learner.load_counts(&source, decay::mtime_day(&path));
             note_skipped(&path, skipped);
         }
         let words_path = Self::words_path(&path);
@@ -143,13 +227,18 @@ impl FrequencyLearner {
         }
         let english_path = Self::english_path(&path);
         if let Some(source) = read_text_lossy(&english_path)? {
-            let skipped = learner.load_english(&source);
+            let skipped = learner.load_english(&source, decay::mtime_day(&english_path));
             note_skipped(&english_path, skipped);
         }
         let typos_path = Self::typos_path(&path);
         if let Some(source) = read_text_lossy(&typos_path)? {
-            let skipped = learner.load_typos(&source);
+            let skipped = learner.load_typos(&source, decay::mtime_day(&typos_path));
             note_skipped(&typos_path, skipped);
+        }
+        let sentences_path = Self::sentences_path(&path);
+        if let Some(source) = read_text_lossy(&sentences_path)? {
+            let skipped = learner.load_sentences(&source);
+            note_skipped(&sentences_path, skipped);
         }
         learner.path = Some(path);
         Ok(learner)
@@ -168,12 +257,24 @@ impl FrequencyLearner {
     }
 
     pub fn save_to(&mut self, path: impl AsRef<Path>) -> Result<(), LearningError> {
-        let mut rows: Vec<(&String, &u32)> = self.counts.iter().collect();
-        rows.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        let now = self.today.get();
+        let half_life = self.half_life_days;
+        // 冷却到 0 的条目文件与内存一起清出，之后 weight 查不到它
+        self.counts
+            .retain(|_, entry| entry.effective(now, half_life) > 0);
+        let mut rows: Vec<(&String, &Decay)> = self.counts.iter().collect();
+        rows.sort_by(|a, b| {
+            b.1.effective(now, half_life)
+                .cmp(&a.1.effective(now, half_life))
+                .then_with(|| a.0.cmp(b.0))
+        });
         write_atomic(path.as_ref(), |file| {
-            writeln!(file, "# 青简用户词频：词\\t选择次数")?;
-            for (text, count) in rows {
-                writeln!(file, "{text}\t{count}")?;
+            writeln!(
+                file,
+                "# 青简用户词频：词\\t选择次数\\t最近使用日（unix 天）"
+            )?;
+            for (text, entry) in rows {
+                writeln!(file, "{text}\t{}\t{}", entry.count, entry.last_used)?;
             }
             Ok(())
         })?;
@@ -189,6 +290,7 @@ impl FrequencyLearner {
             || self.ngram_dirty
             || self.choices_dirty
             || self.typos_dirty
+            || self.sentences_dirty
     }
 }
 

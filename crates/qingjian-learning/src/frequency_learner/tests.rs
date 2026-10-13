@@ -49,21 +49,21 @@ fn choices_are_keyed_by_input_and_round_trip() {
     let _ = std::fs::remove_file(dir.join(USER_CHOICES_FILE));
 
     let mut learner = FrequencyLearner::from_path(&path).unwrap();
-    learner.record_choice("ba", "吧");
-    learner.record_choice("ba", "吧");
-    learner.record_choice("bazhege", "把");
+    learner.record_choice("ba", "", "吧");
+    learner.record_choice("ba", "", "吧");
+    learner.record_choice("bazhege", "", "把");
     learner.record_raw("nihooma");
     assert_eq!(learner.raw_count("nihooma"), 1);
-    assert_eq!(learner.choice_weight("ba", "吧"), 2);
-    assert_eq!(learner.choice_weight("ba", "把"), 0);
-    assert_eq!(learner.choice_weight("bazhege", "把"), 1);
+    assert_eq!(learner.choice_weight("ba", "", "吧"), 2);
+    assert_eq!(learner.choice_weight("ba", "", "把"), 0);
+    assert_eq!(learner.choice_weight("bazhege", "", "把"), 1);
     learner.flush();
 
     let reloaded = FrequencyLearner::from_path(&path).unwrap();
     assert_eq!(reloaded.choice_count(), 3);
-    assert_eq!(reloaded.choice_weight("ba", "吧"), 2);
+    assert_eq!(reloaded.choice_weight("ba", "", "吧"), 2);
     assert_eq!(reloaded.raw_count("nihooma"), 1);
-    assert_eq!(reloaded.choice_weight("bazhege", "把"), 1);
+    assert_eq!(reloaded.choice_weight("bazhege", "", "把"), 1);
 }
 
 #[test]
@@ -78,31 +78,32 @@ fn unrecord_reverses_each_kind_of_record() {
         aux_code: None,
     };
     learner.record(&candidate);
-    learner.record_choice("kaifa", "开放");
+    learner.record_choice("kaifa", "kaifang", "开放");
     learner.record_transition(Context::START, "开放", 2);
     learner.unrecord("开放");
-    learner.unrecord_choice("kaifa", "开放");
+    learner.unrecord_choice("kaifa", "kaifang", "开放");
     learner.unrecord_transition(Context::START, "开放", 2);
     assert_eq!(learner.weight("开放"), 0);
-    assert_eq!(learner.choice_weight("kaifa", "开放"), 0);
+    assert_eq!(learner.choice_weight("kaifa", "", "开放"), 0);
+    assert_eq!(learner.choice_weight("kaifa", "kaifang", "开放"), 0);
     assert_eq!(learner.choice_count(), 0);
     assert!(learner.user_ngram().is_none());
     // 没记过的撤销不会变成负数
     learner.unrecord("没有");
-    learner.unrecord_choice("x", "没有");
+    learner.unrecord_choice("x", "", "没有");
     assert_eq!(learner.weight("没有"), 0);
 }
 
 #[test]
 fn choices_decay_when_over_the_cap() {
     let mut learner = FrequencyLearner::default();
-    learner.record_choice("a", "甲");
-    learner.record_choice("a", "甲");
-    learner.record_choice("a", "甲");
-    learner.record_choice("a", "乙");
+    learner.record_choice("a", "", "甲");
+    learner.record_choice("a", "", "甲");
+    learner.record_choice("a", "", "甲");
+    learner.record_choice("a", "", "乙");
     learner.decay_choices();
-    assert_eq!(learner.choice_weight("a", "甲"), 1);
-    assert_eq!(learner.choice_weight("a", "乙"), 0);
+    assert_eq!(learner.choice_weight("a", "", "甲"), 1);
+    assert_eq!(learner.choice_weight("a", "", "乙"), 0);
     assert_eq!(learner.choice_count(), 1);
 }
 
@@ -176,7 +177,7 @@ fn broken_lines_are_skipped_instead_of_failing_the_load() {
     assert_eq!(learner.weight("开发"), 3);
     assert_eq!(learner.weight("中文"), 1);
     assert_eq!(learner.user_ngram().unwrap().pair(Some("我"), "想"), 2);
-    assert_eq!(learner.choice_weight("ba", "吧"), 2);
+    assert_eq!(learner.choice_weight("ba", "", "吧"), 2);
     assert_eq!(learner.typo_count("gan", "guan"), 1);
     assert_eq!(learner.word_count(), 1);
     assert_eq!(learner.english_count(), 2);
@@ -192,7 +193,7 @@ fn saving_is_atomic_and_leaves_no_temporary_files() {
     let path = dir.join("user.tsv");
     let mut learner = FrequencyLearner::from_path(&path).unwrap();
     learner.record(&candidate("开发"));
-    learner.record_choice("kaifa", "开发");
+    learner.record_choice("kaifa", "", "开发");
     learner.record_transition(Context::START, "开发", 1);
     learner.record_typo("gan", "guan");
     learner.learn_word("账套", &["zhang".into(), "tao".into()]);
@@ -220,17 +221,17 @@ fn forget_removes_the_user_word_and_every_trace_of_learning() {
     let mut learner = FrequencyLearner::default();
     learner.learn_word("账套", &["zhang".into(), "tao".into()]);
     learner.record(&candidate("账套"));
-    learner.record_choice("zhangtao", "账套");
-    learner.record_choice("zt", "账套");
-    learner.record_choice("zt", "周天");
+    learner.record_choice("zhangtao", "", "账套");
+    learner.record_choice("zt", "", "账套");
+    learner.record_choice("zt", "", "周天");
     learner.record_transition(Context::START, "账套", 1);
     learner.record_transition(Context::after("账套"), "建好", 1);
     let forgotten = learner.forget("账套");
     assert!(forgotten.user_word && forgotten.learning);
     assert!(learner.user_words().is_none());
     assert_eq!(learner.weight("账套"), 0);
-    assert_eq!(learner.choice_weight("zt", "账套"), 0);
-    assert_eq!(learner.choice_weight("zt", "周天"), 1);
+    assert_eq!(learner.choice_weight("zt", "", "账套"), 0);
+    assert_eq!(learner.choice_weight("zt", "", "周天"), 1);
     assert!(learner.user_ngram().is_none());
     // 词库词、没学过：什么都没清
     assert!(learner.forget("开发").is_nothing());
@@ -295,4 +296,105 @@ fn english_words_round_trip_through_tsv_and_form_a_word_list() {
     );
     let saved = std::fs::read_to_string(FrequencyLearner::english_path(&path)).unwrap();
     assert!(saved.contains("gist\t2"));
+}
+
+#[test]
+fn choices_generalize_by_reading_key() {
+    let mut learner = FrequencyLearner::default();
+    // `wod` 下选的 我的：字面键与读音键各记一份
+    learner.record_choice("wod", "wode", "我的");
+    assert_eq!(learner.choice_weight("wod", "", "我的"), 1);
+    assert_eq!(learner.choice_weight("wod", "wode", "我的"), 1);
+    // 换个打法（补完音节，查询按候选覆盖的前缀传输入）：读音键命中
+    assert_eq!(learner.choice_weight("wode", "wode", "我的"), 1);
+    // 别的词不受影响
+    assert_eq!(learner.choice_weight("wode", "wode", "沃德"), 0);
+    // 简拼输入不是读音的前缀：全拼下的选择不带过来（`sm` 不能继承 `shangmian` 选的 上面）
+    learner.record_choice("shangmian", "shangmian", "上面");
+    assert_eq!(learner.choice_weight("sm", "shangmian", "上面"), 0);
+    // 单字母简拼同样不带
+    learner.record_choice("mai", "mai", "买");
+    assert_eq!(learner.choice_weight("m", "mai", "买"), 0);
+    // 撤销把两个键一起退掉
+    learner.unrecord_choice("wod", "wode", "我的");
+    assert_eq!(learner.choice_weight("wod", "", "我的"), 0);
+    assert_eq!(learner.choice_weight("wode", "wode", "我的"), 0);
+    // 上面 / 买 两条与本用例无关的记录还在
+    assert_eq!(learner.choice_count(), 2);
+}
+
+#[test]
+fn weight_decays_by_half_life_and_stale_entries_are_pruned_on_save() {
+    let dir = std::env::temp_dir().join("qingjian-decay-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("user.tsv");
+
+    let mut learner = FrequencyLearner::from_path(&path).unwrap();
+    learner.record(&candidate("开发"));
+    learner.record(&candidate("开发"));
+    learner.record(&candidate("中文"));
+    // 拨到 60 天前：30 天半衰期下 2 次变 1 次、1 次变 0 次
+    for entry in learner.counts.values_mut() {
+        entry.last_used -= 60;
+    }
+    assert_eq!(learner.weight("开发"), 1);
+    assert_eq!(learner.weight("中文"), 0);
+    learner.flush();
+    // 冷却到 0 的条目落盘时清出
+    assert_eq!(learner.weight("中文"), 0);
+    assert_eq!(learner.counts.len(), 1);
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("开发\t2\t"), "{saved:?}");
+    assert!(!saved.contains("中文"));
+
+    // 再拨老 30 天：开发 也冷却到 0，flush 重写后消失
+    for entry in learner.counts.values_mut() {
+        entry.last_used -= 30;
+    }
+    assert_eq!(learner.weight("开发"), 0);
+    learner.flush();
+    assert!(learner.counts.is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn loading_new_and_old_user_tsv_formats() {
+    let mut learner = FrequencyLearner::default();
+    // 新格式：带最近使用日；800 天前的 10 次冷却到 0
+    let today = learner.today.get();
+    let loaded = learner.load_counts(&format!("开发\t10\t{}\n中文\t4\t{today}\n", today - 800), 0);
+    assert_eq!(loaded, 0);
+    assert_eq!(learner.weight("中文"), 4);
+    assert_eq!(learner.weight("开发"), 0);
+    // 旧格式（没有天数列）：整份按 fallback_day 计
+    let mut learner = FrequencyLearner::default();
+    let loaded = learner.load_counts("旧词\t7\n坏行\n", today - 30);
+    assert_eq!(loaded, 1);
+    assert_eq!(
+        learner.weight("旧词"),
+        4,
+        "30 天前的 7 次衰减到约 3.5，四舍五入 4"
+    );
+}
+
+#[test]
+fn english_words_decay_out_of_the_list() {
+    let dir = std::env::temp_dir().join("qingjian-english-decay-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("user.tsv");
+
+    let mut learner = FrequencyLearner::from_path(&path).unwrap();
+    learner.learn_english("stale");
+    learner.learn_english("fresh");
+    // 30 天前学的那条冷却到 0：flush 清出后不再出候选
+    learner.english.get_mut("stale").unwrap().1.last_used -= 31;
+    learner.flush();
+    assert_eq!(learner.english_count(), 1);
+    assert_eq!(learner.user_english().unwrap().get("stale"), None);
+    assert_eq!(learner.user_english().unwrap().get("fresh"), Some("fresh"));
+    let saved = std::fs::read_to_string(FrequencyLearner::english_path(&path)).unwrap();
+    assert!(!saved.contains("stale"), "{saved:?}");
+    std::fs::remove_dir_all(dir).unwrap();
 }
