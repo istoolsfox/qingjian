@@ -148,6 +148,11 @@ impl Learner for MutedLearner {
         self.inner.typo_count(typed, intended)
     }
 
+    // 衰减半衰期是调参配置，不是这段输入的学习，私密中照设
+    fn set_decay_half_life(&mut self, days: f64) {
+        self.inner.set_decay_half_life(days);
+    }
+
     // 删词是用户在候选窗口里明确要求的管理操作，不算「这段输入的学习」，私密中照做
     fn forget(&mut self, text: &str) -> Forgotten {
         self.inner.forget(text)

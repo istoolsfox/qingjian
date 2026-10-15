@@ -96,6 +96,9 @@ pub trait Learner: Send {
     ///
     /// 失败只记日志不返回错误：输入优先于学习，持久化失败不该影响壳的流程。
     fn flush(&mut self) {}
+
+    /// 选择次数衰减的半衰期（天），0 为不衰减。缺省不动；回放调参（`--tune decay-days=`）才换。
+    fn set_decay_half_life(&mut self, _days: f64) {}
 }
 
 /// 不学习。

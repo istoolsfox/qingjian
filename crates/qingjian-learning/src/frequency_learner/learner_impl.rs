@@ -4,13 +4,20 @@ use super::*;
 
 impl Learner for FrequencyLearner {
     fn record(&mut self, candidate: &Candidate) {
-        *self.counts.entry(candidate.text.clone()).or_default() += 1;
+        self.tick();
+        let now = self.today.get();
+        self.counts
+            .entry(candidate.text.clone())
+            .or_insert_with(|| Decay::from_parts(0, now))
+            .record(1, now);
         self.dirty = true;
         tracing::debug!(text = %candidate.text, "记录用户选择");
     }
 
     fn weight(&self, text: &str) -> u32 {
-        self.counts.get(text).copied().unwrap_or(0)
+        self.counts
+            .get(text)
+            .map_or(0, |entry| self.effective(entry))
     }
 
     fn record_choice(&mut self, input: &str, text: &str) {
@@ -43,9 +50,10 @@ impl Learner for FrequencyLearner {
     }
 
     fn unrecord(&mut self, text: &str) {
-        if let Some(count) = self.counts.get_mut(text) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
+        self.tick();
+        if let Some(entry) = self.counts.get_mut(text) {
+            entry.unrecord(1);
+            if entry.count == 0 {
                 self.counts.remove(text);
             }
             self.dirty = true;
@@ -99,12 +107,14 @@ impl Learner for FrequencyLearner {
         if word.is_empty() {
             return;
         }
+        self.tick();
+        let now = self.today.get();
         let entry = self
             .english
             .entry(word.to_ascii_lowercase())
-            .or_insert_with(|| (word.to_owned(), 0));
-        entry.1 += 1;
-        let count = entry.1;
+            .or_insert_with(|| (word.to_owned(), Decay::from_parts(0, now)));
+        entry.1.record(1, now);
+        let count = entry.1.count;
         self.english_dirty = true;
         self.rebuild_english();
         tracing::debug!(word, count, "记录个人英文词");
@@ -131,12 +141,14 @@ impl Learner for FrequencyLearner {
         if typed.is_empty() || intended.is_empty() {
             return;
         }
-        *self
-            .typos
+        self.tick();
+        let now = self.today.get();
+        self.typos
             .entry(typed.to_owned())
             .or_default()
             .entry(intended.to_owned())
-            .or_default() += 1;
+            .or_insert_with(|| Decay::from_parts(0, now))
+            .record(1, now);
         self.typos_dirty = true;
         tracing::debug!(typed, intended, "记录敲错");
     }
@@ -145,9 +157,9 @@ impl Learner for FrequencyLearner {
         let Some(intended_counts) = self.typos.get_mut(typed) else {
             return;
         };
-        if let Some(count) = intended_counts.get_mut(intended) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
+        if let Some(entry) = intended_counts.get_mut(intended) {
+            entry.unrecord(1);
+            if entry.count == 0 {
                 intended_counts.remove(intended);
             }
             self.typos_dirty = true;
@@ -161,8 +173,11 @@ impl Learner for FrequencyLearner {
         self.typos
             .get(typed)
             .and_then(|intended_counts| intended_counts.get(intended))
-            .copied()
-            .unwrap_or(0)
+            .map_or(0, |entry| self.effective(entry))
+    }
+
+    fn set_decay_half_life(&mut self, days: f64) {
+        self.set_half_life_days(days);
     }
 
     fn forget(&mut self, text: &str) -> Forgotten {
@@ -210,6 +225,7 @@ impl Learner for FrequencyLearner {
         let Some(path) = self.path.clone() else {
             return;
         };
+        self.tick();
         if self.dirty {
             match self.save_to(&path) {
                 Ok(()) => {

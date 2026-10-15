@@ -204,7 +204,7 @@ fn saving_is_atomic_and_leaves_no_temporary_files() {
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names.len(), 6, "{names:?}");
+    assert_eq!(names.len(), 9, "{names:?}");
     assert!(names.iter().all(|name| !name.contains(".tmp")), "{names:?}");
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -295,4 +295,108 @@ fn english_words_round_trip_through_tsv_and_form_a_word_list() {
     );
     let saved = std::fs::read_to_string(FrequencyLearner::english_path(&path)).unwrap();
     assert!(saved.contains("gist\t2"));
+}
+
+#[test]
+fn weight_decays_by_half_life_and_only_year_cold_entries_are_pruned() {
+    let dir = std::env::temp_dir().join("qingjian-decay-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("user.tsv");
+
+    let mut learner = FrequencyLearner::from_path(&path).unwrap();
+    learner.record(&candidate("开发"));
+    learner.record(&candidate("开发"));
+    learner.record(&candidate("中文"));
+    // 拨到 90 天前：90 天半衰期下 2 次变 1 次、1 次变 0.5 回 1
+    for entry in learner.counts.values_mut() {
+        entry.last_used -= 90;
+    }
+    assert_eq!(learner.weight("开发"), 1);
+    assert_eq!(learner.weight("中文"), 1);
+    // 冷却到 0 也只压排序：记录留着，重排后仍能查出原次数
+    for entry in learner.counts.values_mut() {
+        entry.last_used -= 180;
+    }
+    assert_eq!(learner.weight("开发"), 0);
+    assert_eq!(learner.counts.get("开发").unwrap().count, 2, "记录本身不减");
+    learner.flush();
+    // 冷不到一年的记录原样保留（主表旧格式两列，日期在侧车）
+    assert_eq!(learner.counts.len(), 2);
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("开发\t2"), "{saved:?}");
+    let days = std::fs::read_to_string(FrequencyLearner::days_path(&path)).unwrap();
+    assert!(days.contains("开发\t"), "{days:?}");
+
+    // 拨过一年：落盘时文件与内存一起清出（没有新记录也清，直接走保存）
+    for entry in learner.counts.values_mut() {
+        entry.last_used -= 400;
+    }
+    learner.save_to(&path).unwrap();
+    assert!(learner.counts.is_empty());
+    let days = std::fs::read_to_string(FrequencyLearner::days_path(&path)).unwrap();
+    assert!(!days.contains("开发"), "{days:?}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn days_come_from_the_sidecar_and_fall_back_to_mtime() {
+    let mut learner = FrequencyLearner::default();
+    // 主表旧格式两列；日期在侧车文件里，没有的条目退回 fallback_day
+    let today = learner.today.get();
+    let loaded = learner.load_counts("开发\t10\n中文\t4\n", today);
+    assert_eq!(loaded, 0);
+    learner.load_days(&format!("开发\t{}\n", today - 180));
+    assert_eq!(
+        learner.counts.get("开发").unwrap().count,
+        10,
+        "记录本身不减"
+    );
+    assert_eq!(
+        learner.weight("开发"),
+        3,
+        "180 天前的 10 次折半两次，四舍五入 3"
+    );
+    assert_eq!(
+        learner.weight("中文"),
+        4,
+        "侧车没提的条目按 fallback_day（今天）算"
+    );
+    // 旧版本写的主表（没有侧车）照读，整份按文件的修改日计
+    let mut learner = FrequencyLearner::default();
+    let loaded = learner.load_counts("旧词\t7\n坏行\n", today - 90);
+    assert_eq!(loaded, 1);
+    assert_eq!(
+        learner.weight("旧词"),
+        4,
+        "90 天前的 7 次衰减到约 3.5，四舍五入 4"
+    );
+}
+
+#[test]
+fn cold_english_words_stay_in_the_list_until_a_year_cold() {
+    let dir = std::env::temp_dir().join("qingjian-english-decay-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("user.tsv");
+
+    let mut learner = FrequencyLearner::from_path(&path).unwrap();
+    learner.learn_english("stale");
+    learner.learn_english("fresh");
+    // 冷到 0 的英文词仍在词表里（排序权重最低按 1），别让用户觉得学过的词被忘掉了
+    learner.english.get_mut("stale").unwrap().1.last_used -= 200;
+    learner.flush();
+    assert_eq!(learner.english_count(), 2);
+    assert_eq!(learner.user_english().unwrap().get("stale"), Some("stale"));
+    let saved = std::fs::read_to_string(FrequencyLearner::english_path(&path)).unwrap();
+    assert!(saved.contains("stale\t1"), "{saved:?}");
+    // 冷过一年：落盘时清出（没有新记录也清，直接走保存）
+    learner.english.get_mut("stale").unwrap().1.last_used -= 600;
+    learner
+        .save_english_to(&FrequencyLearner::english_path(&path))
+        .unwrap();
+    assert_eq!(learner.english_count(), 1);
+    let saved = std::fs::read_to_string(FrequencyLearner::english_path(&path)).unwrap();
+    assert!(!saved.contains("stale"), "{saved:?}");
+    std::fs::remove_dir_all(dir).unwrap();
 }
