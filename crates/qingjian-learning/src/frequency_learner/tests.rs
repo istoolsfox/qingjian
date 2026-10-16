@@ -49,9 +49,9 @@ fn choices_are_keyed_by_input_and_round_trip() {
     let _ = std::fs::remove_file(dir.join(USER_CHOICES_FILE));
 
     let mut learner = FrequencyLearner::from_path(&path).unwrap();
-    learner.record_choice("ba", "吧");
-    learner.record_choice("ba", "吧");
-    learner.record_choice("bazhege", "把");
+    learner.record_choice("ba", "", "吧");
+    learner.record_choice("ba", "", "吧");
+    learner.record_choice("bazhege", "", "把");
     learner.record_raw("nihooma");
     assert_eq!(learner.raw_count("nihooma"), 1);
     assert_eq!(learner.choice_weight("ba", "吧"), 2);
@@ -78,10 +78,10 @@ fn unrecord_reverses_each_kind_of_record() {
         aux_code: None,
     };
     learner.record(&candidate);
-    learner.record_choice("kaifa", "开放");
+    learner.record_choice("kaifa", "", "开放");
     learner.record_transition(Context::START, "开放", 2);
     learner.unrecord("开放");
-    learner.unrecord_choice("kaifa", "开放");
+    learner.unrecord_choice("kaifa", "", "开放");
     learner.unrecord_transition(Context::START, "开放", 2);
     assert_eq!(learner.weight("开放"), 0);
     assert_eq!(learner.choice_weight("kaifa", "开放"), 0);
@@ -89,17 +89,17 @@ fn unrecord_reverses_each_kind_of_record() {
     assert!(learner.user_ngram().is_none());
     // 没记过的撤销不会变成负数
     learner.unrecord("没有");
-    learner.unrecord_choice("x", "没有");
+    learner.unrecord_choice("x", "", "没有");
     assert_eq!(learner.weight("没有"), 0);
 }
 
 #[test]
 fn choices_decay_when_over_the_cap() {
     let mut learner = FrequencyLearner::default();
-    learner.record_choice("a", "甲");
-    learner.record_choice("a", "甲");
-    learner.record_choice("a", "甲");
-    learner.record_choice("a", "乙");
+    learner.record_choice("a", "", "甲");
+    learner.record_choice("a", "", "甲");
+    learner.record_choice("a", "", "甲");
+    learner.record_choice("a", "", "乙");
     learner.decay_choices();
     assert_eq!(learner.choice_weight("a", "甲"), 1);
     assert_eq!(learner.choice_weight("a", "乙"), 0);
@@ -192,7 +192,7 @@ fn saving_is_atomic_and_leaves_no_temporary_files() {
     let path = dir.join("user.tsv");
     let mut learner = FrequencyLearner::from_path(&path).unwrap();
     learner.record(&candidate("开发"));
-    learner.record_choice("kaifa", "开发");
+    learner.record_choice("kaifa", "", "开发");
     learner.record_transition(Context::START, "开发", 1);
     learner.record_typo("gan", "guan");
     learner.learn_word("账套", &["zhang".into(), "tao".into()]);
@@ -220,9 +220,9 @@ fn forget_removes_the_user_word_and_every_trace_of_learning() {
     let mut learner = FrequencyLearner::default();
     learner.learn_word("账套", &["zhang".into(), "tao".into()]);
     learner.record(&candidate("账套"));
-    learner.record_choice("zhangtao", "账套");
-    learner.record_choice("zt", "账套");
-    learner.record_choice("zt", "周天");
+    learner.record_choice("zhangtao", "", "账套");
+    learner.record_choice("zt", "", "账套");
+    learner.record_choice("zt", "", "周天");
     learner.record_transition(Context::START, "账套", 1);
     learner.record_transition(Context::after("账套"), "建好", 1);
     let forgotten = learner.forget("账套");
@@ -399,4 +399,33 @@ fn cold_english_words_stay_in_the_list_until_a_year_cold() {
     let saved = std::fs::read_to_string(FrequencyLearner::english_path(&path)).unwrap();
     assert!(!saved.contains("stale"), "{saved:?}");
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn choices_generalize_by_reading_key() {
+    let mut learner = FrequencyLearner::default();
+    // `wod` 下选的 我的：字面键与读音键各记一份
+    learner.record_choice("wod", "wode", "我的");
+    assert_eq!(learner.choice_weight("wod", "我的"), 1);
+    // 换个打法把音节打全：读音键在记录侧已写好，查询按字面键直接命中
+    assert_eq!(learner.choice_weight("wode", "我的"), 1);
+    // 别的词不受影响
+    assert_eq!(learner.choice_weight("wode", "沃德"), 0);
+    // 打一半的短查询不带走更长输入下的选择：`yiyi` 选的 意义 不冒到 `yiy` 上
+    //（`yiy` 是用户选 一样 的地方，长输入的历史不该隔串压它）
+    learner.record_choice("yiyi", "yiyi", "意义");
+    assert_eq!(learner.choice_weight("yiy", "意义"), 0);
+    // 双字母简拼也泛化到全拼读音（`sm` 选的 上面，`shangmian` 再打认账）
+    learner.record_choice("sm", "shangmian", "上面");
+    assert_eq!(learner.choice_weight("shangmian", "上面"), 1);
+    // 单字母简拼不泛化：`g` 选的 该 不进 `gai` 键（那里是用户认真打 改 的地方）
+    learner.record_choice("g", "gai", "该");
+    assert_eq!(learner.choice_weight("gai", "该"), 0);
+    assert_eq!(learner.choice_weight("g", "该"), 1);
+    // 撤销把两个键一起退掉
+    learner.unrecord_choice("wod", "wode", "我的");
+    assert_eq!(learner.choice_weight("wod", "我的"), 0);
+    assert_eq!(learner.choice_weight("wode", "我的"), 0);
+    // 与撤销无关的记录还在：意义 / 上面（两条键）/ 该
+    assert_eq!(learner.choice_count(), 4);
 }

@@ -84,7 +84,10 @@ CandidateLayout 保持 `set_cloud` 的首页末尾布局与本地首项；`set_c
 
 ## crates/qingjian-learning
 
-- `FrequencyLearner`：用户选择次数（`user.tsv`，带最近使用日）、按输入串记的选择（`user-choices.tsv`，词级排序里同输入串选过的优先）、用户词（`user-words.tsv`，主词库同格式，
+- `FrequencyLearner`：用户选择次数（`user.tsv`，带最近使用日）、按输入串记的选择（`user-choices.tsv`，词级排序里同输入串选过的优先；泛化在**记录侧**完成：
+  选择除记字面键外，读音键（候选音节连写）上另记一份——`wod` / 双拼选的，换回全拼再打同样认账；单字母简拼（`g`）不泛化，
+  那里翻页选词的意图太弱，带进全拼键会反过来压用户后来认真打的（`g` 选的 该 压住 `gai` 下的 改）。查询只看字面键，
+  更短的查询（`yiy`）不带走更长输入（`yiyi`）下的选择，隔串压不到别人；英文词位置的仲裁同样只按字面键）、用户词（`user-words.tsv`，主词库同格式，
   Engine 与主词库一起查）、个人英文词（`user-english.tsv`，回车原样上屏的英文词与选过的英文候选，与随包英文词表一起出候选且在前；
   原样上屏的串要像一个词才学：`MIN_ENGLISH_WORD_LETTERS` = 2 到 `MAX_ENGLISH_WORD_LETTERS` = 15 个字母、切不成完整拼音、
   也不能读成「拼音头 + 英文尾」——打不出来时整串上屏的失败拼音学进去会反过来堵住混输那条路，越打不出来学得越多）、

@@ -64,9 +64,9 @@ impl Learner for MutedLearner {
         self.inner.weight(text)
     }
 
-    fn record_choice(&mut self, input: &str, text: &str) {
+    fn record_choice(&mut self, input: &str, reading: &str, text: &str) {
         if !self.muted() {
-            self.inner.record_choice(input, text);
+            self.inner.record_choice(input, reading, text);
         }
     }
 
@@ -90,9 +90,9 @@ impl Learner for MutedLearner {
         }
     }
 
-    fn unrecord_choice(&mut self, input: &str, text: &str) {
+    fn unrecord_choice(&mut self, input: &str, reading: &str, text: &str) {
         if !self.muted() {
-            self.inner.unrecord_choice(input, text);
+            self.inner.unrecord_choice(input, reading, text);
         }
     }
 
