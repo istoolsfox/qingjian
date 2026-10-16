@@ -32,6 +32,13 @@ const USER_ENGLISH_FILE: &str = "user-english.tsv";
 /// 个人敲错表文件名，与词频文件同目录：`敲的\t要的\t次数`（音节级，接受过的纠正）。
 const USER_TYPOS_FILE: &str = "user-typos.tsv";
 
+/// 整段提交的整句选择文件名：`输入串\t读音\t句子\t次数`。整句回灌的计数（Core `finish_sentence`），
+/// 与按输入串记的选择分开存：整段的选择不参与词级排序与英文词位置判定。
+const USER_SENTENCES_FILE: &str = "user-sentences.tsv";
+
+/// 整句选择最多存多少条，超过就整体减半。
+const MAX_SENTENCE_ENTRIES: usize = 10_000;
+
 /// 按输入串记的选择最多存多少条 (输入串, 词)，超过就整体减半（忘掉久远的偏好）。
 const MAX_CHOICE_ENTRIES: usize = 50_000;
 
@@ -70,6 +77,12 @@ pub struct FrequencyLearner {
 
     /// 按输入串记的选择自上次保存后是否有变化。
     choices_dirty: bool,
+
+    /// (输入串, 读音) → (句子 → 整段提交次数)。整句回灌的计数，独立于 [`Self::choices`]。
+    sentences: HashMap<(String, String), HashMap<String, u32>>,
+
+    /// 整句选择自上次保存后是否有变化。
+    sentences_dirty: bool,
 
     /// 个人英文词：小写编码 → (第一次敲的写法, 次数)。回车原样上屏的英文词、选过的英文候选。
     english: BTreeMap<String, (String, u32)>,
@@ -151,6 +164,11 @@ impl FrequencyLearner {
             let skipped = learner.load_typos(&source);
             note_skipped(&typos_path, skipped);
         }
+        let sentences_path = Self::sentences_path(&path);
+        if let Some(source) = read_text_lossy(&sentences_path)? {
+            let skipped = learner.load_sentences(&source);
+            note_skipped(&sentences_path, skipped);
+        }
         learner.path = Some(path);
         Ok(learner)
     }
@@ -189,6 +207,7 @@ impl FrequencyLearner {
             || self.ngram_dirty
             || self.choices_dirty
             || self.typos_dirty
+            || self.sentences_dirty
     }
 }
 

@@ -96,6 +96,22 @@ impl Learner for MutedLearner {
         }
     }
 
+    fn record_sentence_choice(&mut self, input: &str, reading: &str, text: &str) {
+        if !self.muted() {
+            self.inner.record_sentence_choice(input, reading, text);
+        }
+    }
+
+    fn sentence_choice_weight(&self, input: &str, reading: &str, text: &str) -> u32 {
+        self.inner.sentence_choice_weight(input, reading, text)
+    }
+
+    fn unrecord_sentence_choice(&mut self, input: &str, reading: &str, text: &str) {
+        if !self.muted() {
+            self.inner.unrecord_sentence_choice(input, reading, text);
+        }
+    }
+
     fn unrecord_transition(&mut self, context: Context<'_>, word: &str, times: u32) {
         if !self.muted() {
             self.inner.unrecord_transition(context, word, times);
@@ -146,6 +162,10 @@ impl Learner for MutedLearner {
 
     fn typo_count(&self, typed: &str, intended: &str) -> u32 {
         self.inner.typo_count(typed, intended)
+    }
+
+    fn is_user_word(&self, text: &str) -> bool {
+        self.inner.is_user_word(text)
     }
 
     // 删词是用户在候选窗口里明确要求的管理操作，不算「这段输入的学习」，私密中照做

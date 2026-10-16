@@ -1,5 +1,16 @@
 use super::Transition;
 
+/// 一次「输入串 → 文本」的选择记录：整句上屏的那份，撤销时按它退回
+/// [`crate::Learner::record_sentence_choice`]（回灌计数）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    /// 整句的读音键（音节无分隔符连起来）。
+    pub reading: String,
+
+    /// 记录的文本。
+    pub text: String,
+}
+
 /// 最近一次上屏记了哪些学习：用户把它退格删掉、再打同一段拼音换选别的词时，把这些记录退回去。
 /// 没记学习的上屏（英文词、标点、原样上屏）也留一条只有长度的记录，退格数过它才能数到更早的词。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,8 +27,11 @@ pub struct LastCommit {
     /// 消耗掉的那段拼音（按输入串记选择用的键）。
     pub input: String,
 
-    /// 记过一次选择次数（`Learner::record`）与输入串选择（`record_choice`）的词；整句上屏没有。
+    /// 记过一次选择次数（`Learner::record`）与输入串选择（`record_choice`）的词。
     pub chosen: Option<String>,
+
+    /// 整句上屏记的「整段拼音 → 这句话」（见 [`Choice`]），撤销时退回整句信号的那份（回灌计数）。
+    pub choice: Option<Choice>,
 
     /// 记过的词转移（含上文与份数）。
     pub transitions: Vec<Transition>,
@@ -44,6 +58,7 @@ impl LastCommit {
             tail: text.chars().last(),
             input: String::new(),
             chosen: None,
+            choice: None,
             transitions: Vec::new(),
             typos: Vec::new(),
             erased: 0,

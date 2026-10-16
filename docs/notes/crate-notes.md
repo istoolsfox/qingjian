@@ -88,7 +88,9 @@ macOS 面板一律系统绘制（青简渲染器还没有面板），`candidates
   也不能读成「拼音头 + 英文尾」——打不出来时整串上屏的失败拼音学进去会反过来堵住混输那条路，越打不出来学得越多）、
   个人敲错表（`user-typos.tsv`，接受过的 (敲的, 要的) 音节对，词图敲错边与整段纠错的代价按它打折）与个人 n-gram（`user-ngram.tsv`，Core `sentence::UserNgram`，
   二元 + 三元在线计数，整句转换与词级排序里与静态模型插值；Tab 接受的云端整句按 `sentence::segment_text` 切词后也记；
-  连着选出的两个词记够次数自动造词进用户词，一段拼音分几次选完的合成词记两次也造）。
+  连着选出的两个词记够次数自动造词进用户词，一段拼音分几次选完的合成词记两次也造，同一句整句提交满三次也回灌成用户词——见 Core 一节）。
+  整句的整段选择记在**独立的** `user-sentences.tsv`（`输入串\t读音\t句子\t次数`，Core `Learner::record_sentence_choice` 三方法），
+  不进 `user-choices.tsv`：一次整句接受不该在词级排序里算「同串选过」、也不该在英文词位置判定里算「用户选了中文」。
 - `InputLog`：输入日志（`input-log.jsonl`，每次上屏一行：敲的键、切分、看到的前几个候选、选了第几个、来源、纠错、撤销，
   Core `InputLogger` trait 的落盘实现，`[general] input_log` 缺省开，只写本机，给离线回归评测与个人模型用）。
 - `UsageStats`：输入统计（`usage-hourly.tsv`，按小时记汉字 / 中文词 / 英文词 / 上屏 / 选词 / 首选 / 键数 / 打字毫秒 / 删过，Core `UsageMeter` trait 的实现，

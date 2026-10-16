@@ -361,6 +361,13 @@ const AUTO_WORD_THRESHOLD_SAME_BUFFER: u32 = 2;
 /// 分两段打的（`qing` 选 青、再打 `jian` 选 简）信号弱一些，要三次，免得 了我 这类虚词接续也成词。
 const AUTO_WORD_THRESHOLD: u32 = 3;
 
+/// 整句回灌：同一段拼音提交过这么多次的同一句话，就存成用户词（见 `commit::finish_sentence`）。
+/// 与自动造词的跨段阈值一致——一次误按空格不该把一句存下来，三次才认。
+const AUTO_WORD_SENTENCE_THRESHOLD: u32 = 3;
+
+/// 整句回灌成用户词的字数上限：再长进不了整句词图的格子（`MAX_WORD_SYLLABLES` 音节封顶），存了也命中不了。
+const AUTO_WORD_SENTENCE_MAX_CHARS: usize = 12;
+
 /// 退格撤销最多回看几次上屏：删掉「沃德 书」两个词再重打时，要能找到两个词之前的那一次。
 const RECENT_COMMITS: usize = 4;
 

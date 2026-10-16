@@ -36,11 +36,30 @@ pub trait Learner: Send {
     /// 撤销一次 [`Self::record_choice`]。
     fn unrecord_choice(&mut self, _input: &str, _text: &str) {}
 
+    /// 整句上屏按整段记一条「这段拼音 → 这句话」（整句回灌的计数来源，见 `commit::finish_sentence`）。
+    /// 与 [`Self::record_choice`] 分开记：整段的选择不该参与词级排序的同串优先，
+    /// 也不该在英文词位置判定里算「用户选了中文」——一次整句接受就把英文词压到第二位太重了。
+    fn record_sentence_choice(&mut self, _input: &str, _reading: &str, _text: &str) {}
+
+    /// 同一段拼音下这句话被整段提交过几次（整句回灌的阈值）。
+    fn sentence_choice_weight(&self, _input: &str, _reading: &str, _text: &str) -> u32 {
+        0
+    }
+
+    /// 撤销一次 [`Self::record_sentence_choice`]（退格删掉重选时）。
+    fn unrecord_sentence_choice(&mut self, _input: &str, _reading: &str, _text: &str) {}
+
     /// 撤销 `times` 份 [`Self::record_transition`]。
     fn unrecord_transition(&mut self, _context: Context<'_>, _word: &str, _times: u32) {}
 
     /// 记一个词库里没有的词（来自云联想或以后的自动造词），带全拼音节；下次直接从本地出。
     fn learn_word(&mut self, _text: &str, _syllables: &[String]) {}
+
+    /// `text` 是不是用户词（整句多次提交回灌的、云联想学来的、自动造的都在内）：
+    /// 删候选时要不要给 Learner 递「删词」。缺省不是。
+    fn is_user_word(&self, _text: &str) -> bool {
+        false
+    }
 
     /// 用户词组成的小词库，与主词库一起查；没有就返回 `None`。
     fn user_words(&self) -> Option<&Dictionary> {

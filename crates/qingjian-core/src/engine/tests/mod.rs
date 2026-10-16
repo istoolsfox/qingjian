@@ -293,6 +293,7 @@ struct WordLearner {
     ngram: sentence::UserNgram,
     shared: Arc<Mutex<(Vec<String>, sentence::UserNgram)>>,
     choices: HashMap<String, u32>,
+    sentences: HashMap<String, u32>,
 }
 
 impl Learner for WordLearner {
@@ -350,6 +351,48 @@ impl Learner for WordLearner {
 
     fn user_ngram(&self) -> Option<&sentence::UserNgram> {
         Some(&self.ngram)
+    }
+
+    fn record_sentence_choice(&mut self, input: &str, reading: &str, text: &str) {
+        *self
+            .sentences
+            .entry(format!("{input}\t{reading}\t{text}"))
+            .or_default() += 1;
+    }
+
+    fn sentence_choice_weight(&self, input: &str, reading: &str, text: &str) -> u32 {
+        self.sentences
+            .get(&format!("{input}\t{reading}\t{text}"))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn unrecord_sentence_choice(&mut self, input: &str, reading: &str, text: &str) {
+        if let Some(count) = self
+            .sentences
+            .get_mut(&format!("{input}\t{reading}\t{text}"))
+        {
+            *count = count.saturating_sub(1);
+        }
+    }
+
+    fn is_user_word(&self, text: &str) -> bool {
+        self.words.iter().any(|(t, _)| t == text)
+    }
+
+    fn forget(&mut self, text: &str) -> Forgotten {
+        let mut forgotten = Forgotten::default();
+        if self.words.iter().any(|(t, _)| t == text) {
+            self.words.retain(|(t, _)| t != text);
+            let tsv: String = self
+                .words
+                .iter()
+                .map(|(t, s)| format!("{t}\t{}\t100\n", s.join(" ")))
+                .collect();
+            self.dictionary = Some(Dictionary::parse(&tsv).unwrap());
+            forgotten.user_word = true;
+        }
+        forgotten
     }
 }
 

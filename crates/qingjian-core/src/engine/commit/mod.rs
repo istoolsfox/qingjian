@@ -6,8 +6,9 @@ use super::input_log::{InputLogEntry, InputLogger, InputSource};
 use super::learning::Learner;
 use super::query::EnglishTail;
 use super::{
-    AUTO_WORD_MAX_CHARS, AUTO_WORD_THRESHOLD, AUTO_WORD_THRESHOLD_SAME_BUFFER,
-    EXPLICIT_TRANSITION_WEIGHT, Engine, choice_key, segment_longest_prefix,
+    AUTO_WORD_MAX_CHARS, AUTO_WORD_SENTENCE_MAX_CHARS, AUTO_WORD_SENTENCE_THRESHOLD,
+    AUTO_WORD_THRESHOLD, AUTO_WORD_THRESHOLD_SAME_BUFFER, EXPLICIT_TRANSITION_WEIGHT, Engine,
+    choice_key, segment_longest_prefix,
 };
 use crate::candidate::{Candidate, CandidateKind, CandidateList, Language};
 use crate::correction::typo;
@@ -17,9 +18,11 @@ use std::time::Instant;
 
 mod chain;
 mod last;
+mod sentence_fill;
 mod transition;
 
 pub(super) use chain::CommitChain;
+pub(super) use last::Choice;
 pub use last::LastCommit;
 pub use transition::Transition;
 
@@ -142,7 +145,13 @@ impl Engine {
             kind if kind.follows_word() && candidate.syllables.is_empty() => self.whole_scope(),
             CandidateKind::Sentence => {
                 typos = self.accepted_typos(candidate);
-                self.consumed_by(candidate)
+                let (consumed, input) = self.consumed_by(candidate);
+                // 整句不记词频，但「这段拼音就是要这句话」要记：整句回灌成用户词的计数来源（见 [`Self::finish_sentence`]）。
+                // 记在独立的整句信号里，不进 choices——一次整句接受不该算「用户选了中文」去压英文词的位置
+                let reading = candidate.syllables.concat();
+                self.learner
+                    .record_sentence_choice(&input, &reading, &candidate.text);
+                (consumed, input)
             }
             // emoji、颜文字、符号按它对应词的音节消耗拼音，不记学习
             CandidateKind::Emoji | CandidateKind::Kaomoji | CandidateKind::Symbol => {
@@ -257,6 +266,11 @@ impl Engine {
                             buffer_left || index < last,
                         );
                     }
+                    // 整段打完了才回灌：还有剩余拼音说明这句话只是拼出来的一段
+                    if !buffer_left {
+                        let reading = candidate.syllables.concat();
+                        self.finish_sentence(&input, &reading, candidate);
+                    }
                 }
                 None => self.chain.reset(),
             },
@@ -305,6 +319,10 @@ impl Engine {
                     CandidateKind::Chinese | CandidateKind::Code | CandidateKind::Cloud
                 )
                 .then(|| candidate.text.clone()),
+                choice: (candidate.kind == CandidateKind::Sentence).then(|| Choice {
+                    reading: candidate.syllables.concat(),
+                    text: candidate.text.clone(),
+                }),
                 transitions: std::mem::take(&mut self.recording),
                 typos,
                 erased: 0,
@@ -394,6 +412,11 @@ impl Engine {
             self.learner.unrecord(chosen);
             self.learner.unrecord_choice(&last.input, chosen);
         }
+        if let Some(choice) = &last.choice {
+            // 整句的那份记在独立的整句信号里，撤销时只退它
+            self.learner
+                .unrecord_sentence_choice(&last.input, &choice.reading, &choice.text);
+        }
         for transition in &last.transitions {
             self.learner.unrecord_transition(
                 transition.context(),
@@ -425,32 +448,6 @@ impl Engine {
             }
             None => self.align(keys, &candidate.syllables).typos,
         }
-    }
-
-    /// 整句候选对应的词序列：重算一次整句转换，文本对得上才算（对不上说明候选来自别处，不记）。
-    /// 末尾是英文词的整句（我想学好rust）先按头段试，英文词作为最后一个词（音节就是敲的字母）。
-    pub(super) fn sentence_words(
-        &self,
-        candidate: &Candidate,
-    ) -> Option<Vec<sentence::SentenceWord>> {
-        let scope = self.composition.scope();
-        if self.decode(scope).is_none()
-            && let Some(tail) = self.split_english_tail(scope)
-            && let Some(words) = self.mixed_words(scope, &tail, &candidate.text)
-        {
-            return Some(words);
-        }
-        let conversion = match (self.decode(scope), self.active_correction(scope)) {
-            (Some(decoded), _) => {
-                self.convert_sentence(&decoded.segmentation()?.patterns(), true)?
-            }
-            (None, Some(c)) => self.convert_sentence(&c.segmentation.patterns(), false)?,
-            (None, None) => {
-                let (segmentations, _) = segment_longest_prefix(scope).ok()?;
-                self.convert_sentence(&segmentations.first()?.patterns(), true)?
-            }
-        };
-        (conversion.text == candidate.text).then_some(conversion.words)
     }
 
     /// 头段拼音的转换加上英文尾段，与 `text` 对得上时的词序列。

@@ -26,6 +26,7 @@ description: 青简在本机保存的文件及其内容、云联想发送的内�
 | `user.tsv` | 每个词被选择的次数 | 选过的词 |
 | `user-words.tsv` | 自动造词与云端选中的用户词 | 选过的词 |
 | `user-choices.tsv` | 某段拼音下选过的词 | 拼音与选过的词 |
+| `user-sentences.tsv` | 整句输入的记录（同一段拼音多次整句打完会自动记成用户词） | 整句与拼音 |
 | `user-english.tsv` | 原样上屏过的英文词 | 英文词 |
 | `user-typos.tsv` | 被接受的输入错误纠正（输成了什么、本意是什么） | 拼音音节 |
 | `user-ngram.tsv` | 词与词之间的接续 | 连续输入过的词 |

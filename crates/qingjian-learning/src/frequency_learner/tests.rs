@@ -67,6 +67,79 @@ fn choices_are_keyed_by_input_and_round_trip() {
 }
 
 #[test]
+fn sentence_choices_round_trip_and_unrecord() {
+    let dir = std::env::temp_dir().join("qingjian-user-sentences-test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("user.tsv");
+    let _ = std::fs::remove_file(dir.join(USER_SENTENCES_FILE));
+
+    let mut learner = FrequencyLearner::from_path(&path).unwrap();
+    learner.record_sentence_choice("woshizhengju", "woshizhengju", "我是整句");
+    learner.record_sentence_choice("woshizhengju", "woshizhengju", "我是整句");
+    learner.record_sentence_choice("lingyiju", "lingyiju", "另一句");
+    assert_eq!(learner.sentence_count(), 2);
+    // 整句的选择独立于按输入串记的选择，不串进 choices
+    assert_eq!(learner.choice_count(), 0);
+    learner.flush();
+    assert!(dir.join(USER_SENTENCES_FILE).is_file());
+
+    let mut reloaded = FrequencyLearner::from_path(&path).unwrap();
+    assert_eq!(reloaded.sentence_count(), 2);
+    assert_eq!(
+        reloaded.sentence_choice_weight("woshizhengju", "woshizhengju", "我是整句"),
+        2
+    );
+    assert_eq!(
+        reloaded.sentence_choice_weight("woshizhengju", "", "我是整句"),
+        0
+    );
+    reloaded.unrecord_sentence_choice("woshizhengju", "woshizhengju", "我是整句");
+    assert_eq!(
+        reloaded.sentence_choice_weight("woshizhengju", "woshizhengju", "我是整句"),
+        1
+    );
+    // 删词把这句话的整句痕迹一起带走
+    reloaded.forget("我是整句");
+    assert_eq!(reloaded.sentence_count(), 1);
+}
+
+#[test]
+fn sentence_backfill_runs_on_the_real_learner() {
+    // Core 的回灌测试用测试桩学习器；这条走真正的 FrequencyLearner，
+    // 证明整段选择记进了整句表、满三次真的造成用户词（输入法里跑的就是这条链路）
+    let dictionary =
+        Dictionary::parse("想\txiang\t900000\n开\tkai\t900000\n发\tfa\t900000\n").unwrap();
+    let mut engine = qingjian_core::engine::Engine::new(dictionary)
+        .with_learner(Box::new(FrequencyLearner::default()));
+    let commit_sentence = |engine: &mut qingjian_core::engine::Engine| {
+        engine.set_input("xiangkaifa");
+        let candidate = engine.query().unwrap().candidates.items[0].clone();
+        assert_eq!(candidate.kind, qingjian_core::CandidateKind::Sentence);
+        engine.commit(&candidate);
+    };
+    commit_sentence(&mut engine);
+    commit_sentence(&mut engine);
+    assert_eq!(
+        engine
+            .learner()
+            .sentence_choice_weight("xiangkaifa", "xiangkaifa", "想开发"),
+        2
+    );
+    // 第三次：回灌成用户词
+    commit_sentence(&mut engine);
+    assert_eq!(
+        engine
+            .learner()
+            .sentence_choice_weight("xiangkaifa", "xiangkaifa", "想开发"),
+        3
+    );
+    engine.set_input("xiangkaifa");
+    let first = engine.query().unwrap().candidates.items[0].clone();
+    assert_eq!(first.text, "想开发");
+    assert_eq!(first.kind, qingjian_core::CandidateKind::Chinese);
+}
+
+#[test]
 fn unrecord_reverses_each_kind_of_record() {
     let mut learner = FrequencyLearner::default();
     let candidate = Candidate {

@@ -42,6 +42,50 @@ impl Learner for FrequencyLearner {
         self.record_choice(input, RAW_MARK);
     }
 
+    fn record_sentence_choice(&mut self, input: &str, reading: &str, text: &str) {
+        if input.is_empty() || text.is_empty() {
+            return;
+        }
+        *self
+            .sentences
+            .entry((input.to_owned(), reading.to_owned()))
+            .or_default()
+            .entry(text.to_owned())
+            .or_default() += 1;
+        self.sentences_dirty = true;
+        if self.sentence_count() > MAX_SENTENCE_ENTRIES {
+            self.decay_sentences();
+        }
+        tracing::debug!(input, reading = %reading, text, "记录整句的整段选择");
+    }
+
+    fn sentence_choice_weight(&self, input: &str, reading: &str, text: &str) -> u32 {
+        self.sentences
+            .get(&(input.to_owned(), reading.to_owned()))
+            .and_then(|texts| texts.get(text))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn unrecord_sentence_choice(&mut self, input: &str, reading: &str, text: &str) {
+        let Some(texts) = self
+            .sentences
+            .get_mut(&(input.to_owned(), reading.to_owned()))
+        else {
+            return;
+        };
+        if let Some(count) = texts.get_mut(text) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                texts.remove(text);
+            }
+        }
+        if texts.is_empty() {
+            self.sentences
+                .remove(&(input.to_owned(), reading.to_owned()));
+        }
+    }
+
     fn unrecord(&mut self, text: &str) {
         if let Some(count) = self.counts.get_mut(text) {
             *count = count.saturating_sub(1);
@@ -189,6 +233,19 @@ impl Learner for FrequencyLearner {
         for input in emptied {
             self.choices.remove(&input);
         }
+        let mut emptied = Vec::new();
+        for (key, texts) in &mut self.sentences {
+            if texts.remove(text).is_some() {
+                forgotten.learning = true;
+                self.sentences_dirty = true;
+                if texts.is_empty() {
+                    emptied.push(key.clone());
+                }
+            }
+        }
+        for key in emptied {
+            self.sentences.remove(&key);
+        }
         if self.ngram.forget_word(text) > 0 {
             forgotten.learning = true;
             self.ngram_dirty = true;
@@ -259,6 +316,17 @@ impl Learner for FrequencyLearner {
                 }
                 Err(error) => {
                     tracing::warn!(path = %choices_path.display(), %error, "输入串选择保存失败")
+                }
+            }
+        }
+        if self.sentences_dirty {
+            let sentences_path = Self::sentences_path(&path);
+            match self.save_sentences_to(&sentences_path) {
+                Ok(()) => {
+                    tracing::info!(path = %sentences_path.display(), entries = self.sentence_count(), "整句选择已保存")
+                }
+                Err(error) => {
+                    tracing::warn!(path = %sentences_path.display(), %error, "整句选择保存失败")
                 }
             }
         }

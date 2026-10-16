@@ -163,6 +163,82 @@ impl FrequencyLearner {
         self.typos.values().map(HashMap::len).sum()
     }
 
+    /// 整句选择文件与词频文件同目录。
+    pub(super) fn sentences_path(frequency_path: &Path) -> PathBuf {
+        frequency_path.with_file_name(USER_SENTENCES_FILE)
+    }
+
+    /// 从 `输入串\t读音\t句子\t次数` 读整句选择，返回跳过的坏行数。
+    pub(super) fn load_sentences(&mut self, source: &str) -> usize {
+        let mut skipped = 0;
+        for line in data_lines(source) {
+            let mut fields = line.split('\t');
+            let parsed = match (fields.next(), fields.next(), fields.next(), fields.next()) {
+                (Some(input), Some(reading), Some(text), Some(count)) => count
+                    .trim()
+                    .parse::<u32>()
+                    .ok()
+                    .map(|count| (input, reading, text, count)),
+                _ => None,
+            };
+            match parsed {
+                Some((input, reading, text, count)) => {
+                    if count > 0 && !text.is_empty() {
+                        *self
+                            .sentences
+                            .entry((input.to_owned(), reading.to_owned()))
+                            .or_default()
+                            .entry(text.to_owned())
+                            .or_insert(0) += count;
+                    }
+                }
+                None => skipped += 1,
+            }
+        }
+        skipped
+    }
+
+    pub(super) fn save_sentences_to(&mut self, path: &Path) -> Result<(), LearningError> {
+        let mut rows: Vec<(&(String, String), &String, &u32)> = self
+            .sentences
+            .iter()
+            .flat_map(|(key, texts)| texts.iter().map(move |(text, count)| (key, text, count)))
+            .collect();
+        rows.sort_by(|a, b| {
+            (a.0)
+                .0
+                .cmp(&(b.0).0)
+                .then_with(|| (a.0).1.cmp(&(b.0).1))
+                .then_with(|| b.2.cmp(a.2))
+                .then_with(|| a.1.cmp(b.1))
+        });
+        write_atomic(path, |file| {
+            writeln!(file, "# 青简整句选择：输入串\t读音\t句子\t次数")?;
+            for (key, text, count) in rows {
+                writeln!(file, "{}\t{}\t{text}\t{count}", key.0, key.1)?;
+            }
+            Ok(())
+        })?;
+        self.sentences_dirty = false;
+        Ok(())
+    }
+
+    /// 整句选择条数。
+    pub fn sentence_count(&self) -> usize {
+        self.sentences.values().map(HashMap::len).sum()
+    }
+
+    /// 超上限时所有整句计数减半，去掉减到零的。
+    pub(super) fn decay_sentences(&mut self) {
+        for texts in self.sentences.values_mut() {
+            texts.retain(|_, count| {
+                *count /= 2;
+                *count > 0
+            });
+        }
+        self.sentences.retain(|_, texts| !texts.is_empty());
+    }
+
     /// 按输入串记的选择条数。
     pub fn choice_count(&self) -> usize {
         self.choices.values().map(HashMap::len).sum()
