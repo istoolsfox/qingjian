@@ -59,7 +59,7 @@ impl Decay {
     }
 
     /// 有效次数：`count × 2^(−间隔天数 / 半衰期)` 四舍五入。冷却到 0 的条目查询时已不起作用，
-    /// 落盘时清出。`half_life_days` 非 正数视为不衰减。
+    /// 记录仍留着，冷满 [`COLD_DAYS`] 才在落盘时清出。`half_life_days` 非正数视为不衰减。
     pub fn effective(&self, now: u64, half_life_days: f64) -> u32 {
         if half_life_days <= 0.0 {
             return self.count;
@@ -80,7 +80,7 @@ mod tests {
         assert_eq!(entry.effective(130, 30.0), 4);
         assert_eq!(entry.effective(160, 30.0), 2);
         assert_eq!(entry.effective(190, 30.0), 1);
-        // 恰好 0.5 按「四舍五入远离零」进位：120 天还是 1，再老 10 天才是 0（落盘时清出）
+        // 恰好 0.5 按「四舍五入远离零」进位：120 天还是 1，再老 10 天才是 0
         assert_eq!(entry.effective(220, 30.0), 1);
         assert_eq!(entry.effective(230, 30.0), 0);
         // 未来日期（时钟回拨）不放大计数
