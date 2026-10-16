@@ -12,6 +12,12 @@ fn candidate(text: &str) -> Candidate {
 }
 
 #[test]
+fn parse_keeps_counts_as_fresh() {
+    let learner = FrequencyLearner::parse("我\t3\n");
+    assert_eq!(learner.weight("我"), 3);
+}
+
+#[test]
 fn records_and_round_trips_through_tsv() {
     let mut learner = FrequencyLearner::default();
     learner.record(&candidate("开发"));

@@ -136,7 +136,6 @@ impl FrequencyLearner {
     pub fn parse(source: &str) -> Self {
         let mut learner = Self::default();
         learner.load_counts(source, decay::today());
-        learner.load_days(source);
         learner
     }
 
